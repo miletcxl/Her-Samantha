@@ -1,0 +1,20 @@
+node_modules/
+dist/
+output/
+*.log
+.env
+.env.local
+.env.*
+env.json
+.claude/
+
+# Planning and private working notes
+SPEC.md
+IMPLEMENTATION_PLAN.md
+TASKS.md
+PROJECT_STRUCTURE.md
+goal*.md
+修改*.md
+npm.md
+new-api/data/
+new-api/logs/
