@@ -10,7 +10,7 @@ describe("offline run", () => {
     const session = createSamanthaSession();
 
     const result = await session.runOffline({
-      inputPath: "examples/letters_task.json",
+      inputPath: "asset/examples/letters_task.json",
       voice: true,
       ttsProvider: "mock",
       saveArtifacts: true,
@@ -35,7 +35,7 @@ describe("offline run", () => {
     const session = createSamanthaSession();
 
     const result = await session.runOffline({
-      inputPath: "examples/letters_task.json",
+      inputPath: "asset/examples/letters_task.json",
       voice: false,
       ttsProvider: "mock",
       saveArtifacts: false,
@@ -55,7 +55,7 @@ describe("offline run", () => {
 
     try {
       const result = await session.runOffline({
-        inputPath: "examples/letters_task.json",
+        inputPath: "asset/examples/letters_task.json",
         voice: true,
         ttsProvider: "mimo",
         saveArtifacts: true,

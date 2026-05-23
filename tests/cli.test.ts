@@ -14,7 +14,7 @@ describe("cli", () => {
       "dist/cli.js",
       "run",
       "offline",
-      "examples/letters_task.json",
+      "asset/examples/letters_task.json",
       "--tts",
       "mock",
       "--voice",

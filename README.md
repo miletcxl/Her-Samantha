@@ -13,6 +13,10 @@
   <img src="https://img.shields.io/badge/license-MIT-black" />
 </p>
 
+<p align="center">
+  <img src="./asset/figure/samantha.png" alt="Her-Samantha" width="80%" />
+</p>
+
 ---
 
 <details open>
@@ -48,7 +52,7 @@ That's it. Type `/` to see all commands, or just start chatting.
 
 ```bash
 # Run an offline demo (no API keys needed)
-node dist/cli.js run offline examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
+node dist/cli.js run offline asset/examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
 
 # One-shot Pi task
 node dist/cli.js listen pi --pi-real --task "Summarize this project."
@@ -82,7 +86,13 @@ User
 ## TUI
 
 <p align="center">
-  <img src="./docs/assets/tui-main.png" alt="Her-Samantha TUI" width="100%" />
+  <img src="./asset/figure/idle.png" alt="Samantha TUI idle" width="45%" />
+  <img src="./asset/figure/thinking.png" alt="Samantha TUI processing" width="45%" />
+</p>
+
+<p align="center">
+  <img src="./asset/figure/speaking.png" alt="Samantha TUI speaking" width="45%" />
+  <img src="./asset/figure/process.png" alt="Samantha TUI working" width="45%" />
 </p>
 
 **Left panel:** conversation with Samantha and the underlying agent.
@@ -211,7 +221,7 @@ node dist/cli.js tui
 
 ```bash
 # 离线 demo（不需要 API key）
-node dist/cli.js run offline examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
+node dist/cli.js run offline asset/examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
 
 # 单次 Pi 任务
 node dist/cli.js listen pi --pi-real --task "帮我总结一下这个项目"
@@ -245,7 +255,13 @@ node dist/cli.js listen pi --pi-real --task "帮我总结一下这个项目"
 ## TUI
 
 <p align="center">
-  <img src="./docs/assets/tui-main.png" alt="Her-Samantha TUI" width="100%" />
+  <img src="./asset/figure/idle.png" alt="Samantha TUI 空闲" width="45%" />
+  <img src="./asset/figure/thinking.png" alt="Samantha TUI 思考中" width="45%" />
+</p>
+
+<p align="center">
+  <img src="./asset/figure/speaking.png" alt="Samantha TUI 语音播放" width="45%" />
+  <img src="./asset/figure/process.png" alt="Samantha TUI 工作中" width="45%" />
 </p>
 
 **左侧：** 与 Samantha 及底层 agent 的对话区。
