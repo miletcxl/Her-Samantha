@@ -1,233 +1,343 @@
 # Her-Samantha
 
-> A runtime-agnostic agent shell that turns public agent work into concise narration, optional voice, and reviewable artifacts.
+<p align="center">
+  <em>Turn silent agent work into narration, optional voice, and reviewable artifacts.</em>
+  <br>
+  <em>把 Agent 的无声执行，转成有温度的叙述、可选的语音、可回溯的记录。</em>
+</p>
 
-Her-Samantha is a Node.js CLI/TUI for working with agent runtimes through a single interface. Pi is the first runtime adapter; the architecture is intentionally shaped so Codex, Claude, and other agents can sit behind the same boundary later.
+<p align="center">
+  <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" />
+  <img src="https://img.shields.io/badge/runtime-Pi-blue" />
+  <img src="https://img.shields.io/badge/TUI-Ink-cyan" />
+  <img src="https://img.shields.io/badge/license-MIT-black" />
+</p>
 
-## Highlights
+---
 
-- **Unified agent shell**: interact with Pi through Her-Samantha's own TUI instead of embedding Pi's native TUI.
-- **Narration layer**: convert normalized public runtime traces into `spokenSummary`, structured detail, final answer, and risk notes.
-- **Voice without leaking detail**: TTS receives only `spokenSummary`, never raw traces, stack traces, private reasoning, or full detail.
-- **Offline-first tests**: CI uses mock providers, fake runtime paths, and recorded trace fixtures; real Pi and real APIs are manual smoke tests.
-- **Artifacts on demand**: reports, normalized traces, and audio are written only when `--save-artifacts` is used.
+<details open>
+<summary><strong>English</strong> | <a href="#chinese">切换到中文</a></summary>
 
-## Status
+<br>
 
-This project is early. The offline path, mock providers, OpenAI-compatible narration boundary, Mimo TTS boundary, Pi RPC adapter, and Ink TUI shell are implemented. Pi is the only real runtime currently wired into the TUI.
+> **Her-Samantha** is a runtime-agnostic agent shell. It wraps agent runtimes behind a unified CLI/TUI, converts public execution traces into a structured narration, and can optionally speak the result aloud — without ever exposing private reasoning or raw logs to the voice layer.
+
+## Why?
+
+In the film *Her*, Samantha is not just a voice assistant — she is calm, present, and translates computation into something human-facing.
+
+Her-Samantha brings the same idea to agent tooling:
+
+| Without Samantha | With Samantha |
+|---|---|
+| Stare at raw tool logs and stack traces | Get a concise spoken summary |
+| Agent identity bleeds into the UI | Samantha is the consistent face, agent is the engine |
+| Voice reads whatever the agent outputs | Voice only receives `spokenSummary` |
+| No structured review after a task | Folded Summary / Detail / Final / Risk always available |
+
+---
 
 ## Quick Start
 
 ```bash
-npm install
-npm run build
-node dist/cli.js run offline examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
-```
-
-You should see a spoken summary in the terminal and an artifact directory under `output/`.
-
-## TUI
-
-Start the Samantha shell:
-
-```bash
+npm install && npm run build
 node dist/cli.js tui
 ```
 
-The TUI has two zones:
-
-- **Left**: the working conversation with Samantha and the hidden runtime agent.
-- **Right**: Samantha's presence panel with voice state, folded Summary / Detail / Final Answer / Risk sections, and model status.
-
-Useful commands inside the TUI:
-
-```text
-/help
-/voice on
-/voice off
-/voice test
-/voice debug
-/model
-/provider list
-/session
-/final
-/clear
-/exit
-```
-
-The default command is Pi TUI. This is equivalent:
+That's it. Type `/` to see all commands, or just start chatting.
 
 ```bash
-node dist/cli.js tui pi
-```
-
-Text-only TUI:
-
-```bash
-node dist/cli.js tui --no-voice
-```
-
-## CLI Usage
-
-Run an offline recorded trace:
-
-```bash
-node dist/cli.js run offline examples/letters_task.json --narration-provider mock --tts mock --no-voice
-```
-
-Run the offline path and save artifacts:
-
-```bash
+# Run an offline demo (no API keys needed)
 node dist/cli.js run offline examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
+
+# One-shot Pi task
+node dist/cli.js listen pi --pi-real --task "Summarize this project."
 ```
 
-Run one Pi task through the non-interactive shell:
+---
 
-```bash
-node dist/cli.js listen pi --pi-real --pi-timeout-ms 120000 --task "Summarize this project." --narration-provider mock --tts mock --no-voice
+## Architecture
+
+```
+User
+  └─ Her-Samantha TUI / CLI
+       └─ AgentRuntimeAdapter (Pi, future: Codex, Claude)
+            └─ normalized public trace
+                 └─ Narration Layer → spokenSummary + textDetail + riskNote
+                      ├─ TTS (spokenSummary only)
+                      └─ Artifacts (opt-in)
 ```
 
-Check local provider and Pi configuration:
+| Layer | Role |
+|---|---|
+| Runtime Adapter | Owns agent-specific execution |
+| Trace Normalizer | Strips private reasoning, shapes public events |
+| Narration | Converts trace → natural spoken update |
+| Voice / TTS | Synthesizes `spokenSummary` only |
+| Artifacts | Writes report + trace to disk when `--save-artifacts` |
+| TUI | Two-zone Ink interface: conversation + Samantha panel |
 
-```bash
-node dist/cli.js doctor
-```
+---
 
-## Configuration
+## TUI
 
-Her-Samantha loads `.env` and `.samantha/.env.local` locally. Do not commit either file.
+<p align="center">
+  <img src="./docs/assets/tui-main.png" alt="Her-Samantha TUI" width="100%" />
+</p>
 
-Use `.env.example` as a template. API keys are referenced by environment variable name rather than passed directly through commands.
+**Left panel:** conversation with Samantha and the underlying agent.
 
-Minimum Pi-related variables:
+**Right panel:** presence display, voice status, folded Summary / Detail / Final / Risk, and live model status.
 
-```env
-SAMANTHA_PI_PATH=C:\path\to\pi.exe
-SAMANTHA_PI_PROVIDER=xiaomi-token-plan-cn
-SAMANTHA_PI_MODEL=mimo-v2.5-pro
-SAMANTHA_PI_TIMEOUT_MS=120000
-```
+### Shell Commands
 
-OpenAI-compatible narration:
+| Command | |
+|---|---|
+| `/model narr <id>` | Switch narration model |
+| `/model tts <id>` | Switch TTS model |
+| `/model agent <id>` | Switch agent model (restarts Pi) |
+| `/login` | Add a new provider (wizard) |
+| `/provider list` | Show all configured providers |
+| `/provider use narration <name>` | Switch active provider |
+| `/voice on\|off\|test` | Voice control |
+| `/clear` | Clear conversation |
+| `/help` | Show all commands |
 
-```env
-SAMANTHA_NARRATION_BASE_URL=https://example.com/v1
-SAMANTHA_NARRATION_MODEL=your-chat-model
-SAMANTHA_NARRATION_API_KEY_ENV=YOUR_API_KEY_ENV_NAME
-```
-
-Mimo TTS:
-
-```env
-SAMANTHA_TTS_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
-SAMANTHA_TTS_MODEL=mimo-v2.5-tts-voicedesign
-SAMANTHA_TTS_VOICE_DESCRIPTION=warm natural restrained Chinese female assistant voice
-SAMANTHA_TTS_API_KEY_ENV=MIMO_API_KEY
-SAMANTHA_TTS_OUTPUT_FORMAT=mp3
-```
-
-For local provider profiles, the TUI can write `.samantha/providers.json` and `.samantha/.env.local` through `/login` and provider commands.
-
-## How It Works
-
-```text
-Runtime agent
-  -> AgentRuntimeAdapter
-  -> normalized public trace
-  -> NarrationResult
-  -> optional TTS
-  -> optional artifacts
-```
-
-Core boundaries:
-
-- `AgentRuntimeAdapter` owns runtime-specific execution.
-- `RuntimeCapabilities` describes what a runtime can actually expose.
-- Narration providers receive public trace input and return a `NarrationResult`.
-- TTS providers receive only `spokenSummary`.
-- Artifact writing is opt-in.
+---
 
 ## Runtime Support
 
-| Runtime | Status | Boundary |
-|---|---:|---|
-| Offline JSON trace | implemented | recorded fixture replay |
-| Pi | implemented | RPC mode for TUI, JSON print fallback for one-shot smoke tests |
-| Codex | planned | adapter not implemented |
-| Claude | planned | adapter not implemented |
-| Hermes / OpenClaw | planned | adapter not implemented |
+| Runtime | Status |
+|---|---|
+| Offline JSON trace | Implemented |
+| Pi (RPC mode) | Implemented |
+| Codex | Planned |
+| Claude | Planned |
 
-Her-Samantha does not parse native runtime TUIs. Runtime integrations should use the most stable machine-readable boundary each runtime exposes.
+---
 
 ## Providers
 
 | Capability | Provider | Status |
-|---|---:|---|
-| Narration | mock | implemented |
-| Narration | OpenAI-compatible chat completions | implemented |
-| TTS | mock WAV | implemented |
-| TTS | Mimo chat-completions audio | implemented |
+|---|---|---|
+| Narration | OpenAI-compatible chat completions | Implemented |
+| Narration | Mock (deterministic) | Implemented |
+| TTS | Mimo chat-completions audio | Implemented |
+| TTS | Mock WAV | Implemented |
 
-Real provider calls are not required for tests.
+Provider profiles are managed via `/login` and `/provider` in the TUI, stored in `.samantha/providers.json`. Secrets go to `.samantha/.env.local` (gitignored).
 
-## Artifacts
+---
 
-Artifacts are disabled by default. With `--save-artifacts`, Her-Samantha writes:
+## Privacy Boundary
 
-```text
-output/<timestamp>-<runId>/
-  report.md
-  report.json
-  trace.normalized.json
-  samantha_summary.<format>
-```
+> **Speak only what should be spoken. Save only what should be saved.**
 
-Raw runtime events are not saved by default.
+| Never exposed | Why |
+|---|---|
+| Private chain-of-thought | Security |
+| Raw tool logs | Noise |
+| Stack traces | Not for voice |
+| API keys | Never in logs or artifacts |
+| `textDetail` | TTS receives `spokenSummary` only |
+
+---
 
 ## Development
 
 ```bash
-npm run typecheck
-npm test
-npm run build
+npm run typecheck   # tsc --noEmit
+npm test            # vitest run
+npm run build       # tsc
 ```
 
-The test suite must stay independent from real Pi, real API keys, real TTS services, and network access.
+CI uses mocks only — no real Pi, no API keys, no network.
+
+---
 
 ## Project Layout
 
-```text
+```
 src/
-  core/          shared types, event bus, session orchestration
-  runtimes/      offline and Pi runtime adapters
-  providers/     narration, TTS, provider registry, audio playback
-  narration/     fallback, validation, spoken-summary policy checks
+  core/          types, event bus, session orchestration
+  runtimes/      Pi and offline adapters
+  providers/     narration, TTS, provider registry, audio
+  narration/     fallback, policy validation
   artifacts/     report and trace writer
-  renderer/      terminal summary renderer
-  tui/           Ink TUI
-tests/           unit and integration tests with mocks/fakes
+  renderer/      terminal summary
+  tui/           Ink TUI shell
+  cli.ts         entry point
+tests/
 examples/        offline trace fixtures
+.samantha/       agent persona, narration policy, provider registry
 ```
 
-## Privacy And Safety
+</details>
 
-Her-Samantha should not display or store:
+---
 
-- private chain-of-thought
-- raw tool logs by default
-- API keys
-- full environment variables
-- hidden runtime reasoning
+<span id="chinese"></span>
 
-TTS must only receive `spokenSummary`.
+<details>
+<summary><strong>中文</strong> | <a href="#english">Switch to English</a></summary>
 
-## Roadmap
+<br>
 
-- Harden Pi RPC permission prompts and session restore flows.
-- Improve TUI interaction quality: command palette, model/profile switching, and smoother cancellation.
-- Add explicit fake Pi integration coverage for long sessions.
-- Add Codex and Claude adapters when their stable machine-readable boundaries are confirmed.
-- Publish as the `her-samantha` npm package with `samantha` as the bin command.
+> **Her-Samantha** 是一个运行时无关的 Agent Shell。它通过统一的 CLI/TUI 包装底层 agent，把公开执行轨迹转成结构化的叙述，并可以选择语音播报——语音层永远不会接触到私有推理或原始日志。
+
+## 为什么需要它？
+
+电影《Her》中的 Samantha 不只一个语音助手——她冷静、在场、能把计算翻译成人能理解的东西。
+
+Her-Samantha 把同样的理念带到了 agent 工具链：
+
+| 没有 Samantha | 有 Samantha |
+|---|---|
+| 盯着原始 tool log 和 stack trace | 收到一段简短的语音摘要 |
+| Agent 身份暴露在 UI 里 | Samantha 是统一的面孔，agent 是背后的引擎 |
+| 语音直接读 agent 的原始输出 | 语音只接收 `spokenSummary` |
+| 任务结束后没有结构化回顾 | Summary / Detail / Final / Risk 随时可查 |
+
+---
+
+## 快速开始
+
+```bash
+npm install && npm run build
+node dist/cli.js tui
+```
+
+就这样。输入 `/` 查看所有命令，或直接开始聊天。
+
+```bash
+# 离线 demo（不需要 API key）
+node dist/cli.js run offline examples/letters_task.json --narration-provider mock --tts mock --voice --save-artifacts
+
+# 单次 Pi 任务
+node dist/cli.js listen pi --pi-real --task "帮我总结一下这个项目"
+```
+
+---
+
+## 架构
+
+```
+用户
+  └─ Her-Samantha TUI / CLI
+       └─ AgentRuntimeAdapter (Pi，未来：Codex、Claude)
+            └─ 归一化公开 trace
+                 └─ 叙述层 → spokenSummary + textDetail + riskNote
+                      ├─ TTS 语音合成（仅用 spokenSummary）
+                      └─ 产物写入（按需开启）
+```
+
+| 层 | 职责 |
+|---|---|
+| Runtime Adapter | 封装 agent 特定的执行逻辑 |
+| Trace Normalizer | 剥离私有推理，塑形公开事件 |
+| Narration | 将 trace 转为自然的语音摘要 |
+| Voice / TTS | 只对 `spokenSummary` 做语音合成 |
+| Artifacts | `--save-artifacts` 时写入报告和 trace |
+| TUI | 双区 Ink 界面：对话区 + Samantha 面板 |
+
+---
+
+## TUI
+
+<p align="center">
+  <img src="./docs/assets/tui-main.png" alt="Her-Samantha TUI" width="100%" />
+</p>
+
+**左侧：** 与 Samantha 及底层 agent 的对话区。
+
+**右侧：** Samantha 存在感面板——语音状态、折叠的 Summary / Detail / Final / Risk、实时 model 信息。
+
+### Shell 命令
+
+| 命令 | 用途 |
+|---|---|
+| `/model narr <模型id>` | 切换 narration 模型 |
+| `/model tts <模型id>` | 切换 TTS 模型 |
+| `/model agent <模型id>` | 切换 agent 模型（重启 Pi） |
+| `/login` | 新增模型服务商（引导式） |
+| `/provider list` | 查看所有已配置服务商 |
+| `/provider use narration <名称>` | 切换当前使用的服务商 |
+| `/voice on\|off\|test` | 语音开关 / 测试 |
+| `/clear` | 清除对话 |
+| `/help` | 显示帮助 |
+
+---
+
+## 运行时支持
+
+| 运行时 | 状态 |
+|---|---|
+| 离线 JSON trace | 已实现 |
+| Pi（RPC 模式） | 已实现 |
+| Codex | 规划中 |
+| Claude | 规划中 |
+
+---
+
+## 模型服务商
+
+| 能力 | 服务商 | 状态 |
+|---|---|---|
+| Narration | OpenAI-compatible chat | 已实现 |
+| Narration | Mock（确定性输出） | 已实现 |
+| TTS | Mimo chat-completions audio | 已实现 |
+| TTS | Mock WAV | 已实现 |
+
+通过 TUI 中的 `/login` 和 `/provider` 管理服务商配置，保存在 `.samantha/providers.json`。密钥保存在 `.samantha/.env.local`（已 gitignore）。
+
+---
+
+## 隐私边界
+
+> **只播报该播报的。只保存该保存的。**
+
+| 永不暴露 | 原因 |
+|---|---|
+| 私有思维链 | 安全 |
+| 原始工具日志 | 噪音 |
+| 错误堆栈 | 不适合语音 |
+| API 密钥 | 绝不出现在日志或产物中 |
+| `textDetail` | TTS 只接收 `spokenSummary` |
+
+---
+
+## 开发
+
+```bash
+npm run typecheck   # TypeScript 类型检查
+npm test            # 运行测试
+npm run build       # 编译
+```
+
+CI 只用 mock——不依赖真实 Pi、API key 或网络。
+
+---
+
+## 项目结构
+
+```
+src/
+  core/          类型定义、事件总线、会话编排
+  runtimes/      Pi 及离线适配器
+  providers/     叙述、TTS、服务商注册表、音频播放
+  narration/     降级、校验、摘要策略
+  artifacts/     报告及 trace 写入
+  renderer/      终端摘要渲染
+  tui/           Ink TUI 界面
+  cli.ts         入口
+tests/
+examples/        离线 trace 测试数据
+.samantha/       agent 人格、叙述规范、服务商注册表
+```
+
+</details>
+
+---
 
 ## License
 

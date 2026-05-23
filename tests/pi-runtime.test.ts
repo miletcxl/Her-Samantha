@@ -11,6 +11,7 @@ import {
   buildPiJsonPrintArgs,
   buildPiSpawnOptions,
   createPiProcessEnv,
+  extractPiPublicTextUpdate,
   isPiRpcPromptTimeout,
   normalizePiJsonLines,
   PiRuntimeAdapter,
@@ -167,6 +168,27 @@ describe("Pi runtime adapter skeleton", () => {
     expect(isPiRpcPromptTimeout(new Error("Pi RPC prompt timed out after 120000ms. Real Pi model calls can take 60-120 seconds; retry with --pi-timeout-ms 120000 or 180000."))).toBe(true);
     expect(isPiRpcPromptTimeout(new Error("Pi RPC command prompt timed out after 120000ms."))).toBe(false);
     expect(isPiRpcPromptTimeout("Pi RPC prompt timed out after 120000ms.")).toBe(false);
+  });
+
+  it("extracts public streaming text updates from Pi events", () => {
+    expect(
+      extractPiPublicTextUpdate({
+        type: "message_update",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "private reasoning" },
+            { type: "text", text: "Public answer chunk." }
+          ]
+        }
+      })
+    ).toBe("Public answer chunk.");
+    expect(
+      extractPiPublicTextUpdate({
+        type: "message_delta",
+        delta: [{ type: "text", text: "delta chunk" }]
+      })
+    ).toBe("delta chunk");
   });
 
   it("uses Pi RPC spawn settings with stdin pipe", () => {

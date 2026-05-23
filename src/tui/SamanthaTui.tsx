@@ -23,7 +23,7 @@ import { createMockNarration } from "../providers/mockNarration.js";
 import { synthesizeMockTts } from "../providers/mockTts.js";
 import { synthesizeMimoTts } from "../providers/mimoTts.js";
 import { createOpenAICompatibleNarration } from "../providers/openaiCompatibleNarration.js";
-import { PiRuntimeAdapter } from "../runtimes/pi.js";
+import { extractPiPublicTextUpdate, PiRuntimeAdapter } from "../runtimes/pi.js";
 import type { AgentTraceEvent, NarrationInput, NarrationResult, TaskExecutionResult, VoiceOutputResult } from "../core/types.js";
 import { parseTuiSlashCommand, TUI_HELP_TEXT, type TuiSlashCommand } from "./commands.js";
 
@@ -32,6 +32,7 @@ type ConversationEntry =
 
 type RightPanel = "none" | "summary" | "detail" | "final" | "risk";
 type PresenceState = "idle" | "listening" | "thinking" | "speaking" | "warning" | "error";
+type WorkPhase = "idle" | "agent" | "samantha" | "voice-generating" | "speaking";
 
 type LoginWizardState =
   | { step: "idle" }
@@ -78,6 +79,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
   const [finalAnswer, setFinalAnswer] = useState("No final answer yet.");
   const [risk, setRisk] = useState("Risk: none");
   const [status, setStatus] = useState("Starting Pi RPC...");
+  const [phase, setPhase] = useState<WorkPhase>("idle");
   const [running, setRunning] = useState(false);
   const [audioGenerating, setAudioGenerating] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(props.voice);
@@ -97,6 +99,8 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
   const [conversationScrollOffset, setConversationScrollOffset] = useState(0);
   const [registry, setRegistry] = useState<ProviderRegistry | null>(null);
   const [loginWizard, setLoginWizard] = useState<LoginWizardState>({ step: "idle" });
+  const [agentPreview, setAgentPreview] = useState("");
+  const [showOriginalAnswer, setShowOriginalAnswer] = useState(false);
 
   const startRuntime = useCallback(
     async (options: { session?: string; resume?: boolean; continueSession?: boolean; fork?: string }): Promise<void> => {
@@ -118,6 +122,10 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
         if (!mountedRef.current) return;
         if (event.type === "status") setStatus(event.message);
         if (event.type === "trace") setTrace((events) => [...events, event.event].slice(-30));
+        if (event.type === "raw") {
+          const publicText = extractPiPublicTextUpdate(event.event);
+          if (publicText) setAgentPreview(publicText);
+        }
         if (event.type === "permission_prompt") {
           push({ role: "permission", text: event.options?.length ? `${event.message} (${event.options.join("/")})` : event.message });
         }
@@ -158,6 +166,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     const shouldAnimate =
       running ||
       audioGenerating ||
+      phase !== "idle" ||
       voiceStatus === "generating" ||
       voiceStatus === "playing" ||
       voiceStatus === "waiting for Pi" ||
@@ -165,7 +174,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     if (!shouldAnimate) return;
     const timer = setInterval(() => setPulse((value) => (value + 1) % 4), 280);
     return () => clearInterval(timer);
-  }, [input.length, running, audioGenerating, voiceStatus]);
+  }, [input.length, running, audioGenerating, phase, voiceStatus]);
 
   function syncModelsFromRegistry(reg: ProviderRegistry): void {
     if (reg.narration) {
@@ -304,6 +313,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       void adapterRef.current?.cancel();
       setStatus("Cancel requested.");
       setVoiceStatus("cancelled");
+      setPhase("idle");
       return;
     }
     if (key.return) {
@@ -506,7 +516,9 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     }
 
     setRunning(true);
+    setPhase("agent");
     setVoiceStatus(voiceEnabled ? "waiting for Pi" : "off");
+    setAgentPreview("");
     const turnAbort = new AbortController();
     turnAbortRef.current = turnAbort;
     let voiceInBackground = false;
@@ -516,6 +528,9 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       throwIfAborted(turnAbort.signal);
       const finalAnswer = execution.finalResult.finalAnswer ?? execution.trace.at(-1)?.resultSummary ?? "Pi completed.";
       setFinalAnswer(finalAnswer);
+      setAgentPreview("");
+      if (showOriginalAnswer) push({ role: "pi", text: finalAnswer });
+      setPhase("samantha");
       const narration = await createNarration(execution, props, narrationModel);
       throwIfAborted(turnAbort.signal);
       setSummary(narration.spokenSummary);
@@ -534,6 +549,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
 
       if (voiceEnabled) {
         setAudioGenerating(true);
+        setPhase("voice-generating");
         setVoiceStatus("generating");
         try {
           // Phase 1: Generate audio only (input stays locked)
@@ -551,11 +567,12 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
           setAudioGenerating(false);
           setRunning(false);
           voiceInBackground = true;
+          setPhase("speaking");
           setStatus("Ready (audio playing in background)...");
 
           // Phase 2: Play audio in background (user can now type)
           if (generated.success && generated.audioPath) {
-            void playVoiceInBackground(generated.audioPath, setVoiceStatus, turnAbort.signal);
+            void playVoiceInBackground(generated.audioPath, setVoiceStatus, setPhase, turnAbort.signal);
           }
         } catch (error) {
           setAudioGenerating(false);
@@ -574,6 +591,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       });
       setArtifactLabel(artifacts.outputDir ?? (props.saveArtifacts ? props.outDir : "off"));
       setStatus("Ready.");
+      if (!voiceInBackground) setPhase("idle");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const aborted = isAbortError(error);
@@ -585,6 +603,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       }
       setRunning(false);
       setAudioGenerating(false);
+      if (!voiceInBackground) setPhase("idle");
       // Don't override voice status if audio is playing in background
       if (!voiceInBackground) {
         setVoiceStatus((value) => (value === "playing" || value === "generating" || value === "cancelled" ? "done" : value));
@@ -854,6 +873,18 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
         setExpandedPanel("final");
         push({ role: "system", text: `Pi final answer:\n${finalAnswer}` });
         return;
+      case "original":
+        if (typeof command.enabled === "boolean") {
+          setShowOriginalAnswer(command.enabled);
+          push({ role: "system", text: `Original agent answer: ${command.enabled ? "shown after each turn" : "hidden"}.` });
+          return;
+        }
+        if (command.show) {
+          push({ role: "pi", text: finalAnswer });
+          return;
+        }
+        push({ role: "system", text: `Original agent answer is ${showOriginalAnswer ? "on" : "off"}. Use /original on, /original off, or /original show.` });
+        return;
       case "clear":
         setConversation([{ role: "system", text: "Conversation cleared. Pi session remains active." }]);
         setTrace([]);
@@ -879,6 +910,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     input,
     running,
     audioGenerating,
+    phase,
     voiceEnabled,
     voiceStatus,
     status
@@ -912,12 +944,17 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
                 {formatRole(entry.role)} {entry.text}
               </Text>
             ))}
+            {agentPreview.length > 0 && (
+              <Text color="gray" wrap="wrap">
+                agent    | {preview(agentPreview, 220)}
+              </Text>
+            )}
           </Box>
           <Box marginTop={1}>
             {running ? (
-              <Text color="gray">{">> turn locked; waiting for Samantha..."}</Text>
+              <Text color="gray">{`>> ${phaseLabel(phase)}... esc to cancel`}</Text>
             ) : audioGenerating ? (
-              <Text color="yellow">{">> voice locked; generating audio..."}</Text>
+              <Text color="yellow">{`>> ${phaseLabel(phase)}... esc to cancel`}</Text>
             ) : (
               <InputLine value={input} cursorIndex={cursorIndex} pulse={pulse} />
             )}
@@ -935,6 +972,8 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
           presence={presence}
           provider={provider}
           pulse={pulse}
+          phase={phase}
+          showOriginalAnswer={showOriginalAnswer}
           voiceEnabled={voiceEnabled}
         />
       </Box>
@@ -951,6 +990,8 @@ function SamanthaSignalPanel(props: {
   presence: PresenceState;
   provider: string;
   pulse: number;
+  phase: WorkPhase;
+  showOriginalAnswer: boolean;
   voiceEnabled: boolean;
 }): React.ReactElement {
   return (
@@ -968,6 +1009,7 @@ function SamanthaSignalPanel(props: {
         </Text>
         <Text color="gray">{props.provider}</Text>
       </Box>
+      <Text color={phaseColor(props.phase)}>phase: {phaseLabel(props.phase)}</Text>
       <Text color="gray">agent hidden · {props.agentModel} · voice {props.voiceEnabled ? "on" : "off"}</Text>
 
       <Box marginTop={1} flexDirection="column" alignItems="center">
@@ -985,6 +1027,7 @@ function SamanthaSignalPanel(props: {
         <Text color="gray">agent: {props.agentModel}</Text>
         <Text color="gray">narr:  {props.narrationModel}</Text>
         <Text color="gray">tts:   {props.ttsModel}</Text>
+        <Text color="gray">original: {props.showOriginalAnswer ? "on" : "off"}</Text>
         <Text color="gray" dimColor>/model narr|tts|agent to switch</Text>
       </Box>
 
@@ -1201,6 +1244,12 @@ function commandPaletteMeta(input: string): { title: string; description: string
       description: "Turn voice on or off, or run a direct playback test."
     };
   }
+  if (command === "original" || command === "origin") {
+    return {
+      title: "Original answer",
+      description: "Show or hide the underlying agent's public final answer."
+    };
+  }
   return {
     title: "Slash commands",
     description: "Type to filter commands. Select one to continue or run it directly."
@@ -1305,16 +1354,20 @@ async function generateVoiceAudio(
 function playVoiceInBackground(
   audioPath: string,
   setVoiceStatus: (status: string) => void,
+  setPhase: (phase: WorkPhase) => void,
   signal?: AbortSignal
 ): void {
   void (async () => {
     try {
       if (signal?.aborted) return;
       setVoiceStatus("playing");
+      setPhase("speaking");
       const playback = await playAudioFile(audioPath, 60_000, signal);
       setVoiceStatus(playback.played ? "done" : "warning");
+      setPhase("idle");
     } catch {
       setVoiceStatus("done");
+      setPhase("idle");
     }
   })();
 }
@@ -1448,12 +1501,15 @@ function getPresenceState(input: {
   input: string;
   running: boolean;
   audioGenerating: boolean;
+  phase: WorkPhase;
   voiceEnabled: boolean;
   voiceStatus: string;
   status: string;
 }): PresenceState {
   if (/error|failed/i.test(input.status)) return "error";
   if (/warning/i.test(input.status) || input.voiceStatus === "warning") return "warning";
+  if (input.phase === "voice-generating" || input.phase === "speaking") return "speaking";
+  if (input.phase === "agent" || input.phase === "samantha") return "thinking";
   if (input.voiceStatus === "playing" || input.voiceStatus === "generating") return "speaking";
   if (input.running) return "thinking";
   if (input.audioGenerating) return "speaking";
@@ -1482,6 +1538,21 @@ function panelTitle(panel: RightPanel): string {
 
 function preview(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function phaseLabel(phase: WorkPhase): string {
+  if (phase === "agent") return "agent is generating";
+  if (phase === "samantha") return "Samantha is generating";
+  if (phase === "voice-generating") return "Samantha is generating voice";
+  if (phase === "speaking") return "Samantha is speaking";
+  return "idle";
+}
+
+function phaseColor(phase: WorkPhase): string {
+  if (phase === "agent") return "cyan";
+  if (phase === "samantha") return "magentaBright";
+  if (phase === "voice-generating" || phase === "speaking") return "yellow";
+  return "gray";
 }
 
 function isPanelShortcut(
@@ -1545,6 +1616,7 @@ function getSelectionOptions(
     { label: "/resume", description: "Resume a saved session", value: "/resume ", action: "complete" },
     { label: "/save", description: "Show artifact status", value: "/save", action: "submit" },
     { label: "/final", description: "Show hidden Pi final answer", value: "/final", action: "submit" },
+    { label: "/original", description: "Control original agent answer display", value: "/original ", action: "complete" },
     { label: "/clear", description: "Clear conversation", value: "/clear", action: "submit" },
     { label: "/help", description: "Show all commands", value: "/help", action: "submit" },
     { label: "/exit", description: "Exit Samantha", value: "/exit", action: "submit" }
@@ -1591,6 +1663,13 @@ function getSubOptions(
         { label: "off", description: "Disable voice", value: "/voice off", action: "submit" },
         { label: "test", description: "Test voice playback", value: "/voice test", action: "submit" },
         { label: "debug", description: "Inspect last generated audio and playback status", value: "/voice debug", action: "submit" }
+      ];
+    }
+    if (cmd === "original" || cmd === "origin") {
+      return [
+        { label: "on", description: "Show original agent answer after each turn", value: "/original on", action: "submit" },
+        { label: "off", description: "Hide original agent answer by default", value: "/original off", action: "submit" },
+        { label: "show", description: "Show the latest original agent answer once", value: "/original show", action: "submit" }
       ];
     }
     return [];

@@ -637,6 +637,20 @@ function extractPublicText(content: unknown): string {
     .trim();
 }
 
+export function extractPiPublicTextUpdate(event: unknown): string | undefined {
+  if (!isRecord(event)) return undefined;
+  if (isRecord(event.message)) {
+    const text = extractPublicText(event.message.content);
+    if (text) return text;
+  }
+  const contentText = extractPublicText(event.content);
+  if (contentText) return contentText;
+  const deltaText = extractPublicText(event.delta);
+  if (deltaText) return deltaText;
+  const directText = stringField(event, "text") ?? stringField(event, "content") ?? stringField(event, "delta");
+  return directText?.trim() || undefined;
+}
+
 function summarizeToolArgs(args: unknown): string | undefined {
   if (!isRecord(args)) return undefined;
   const path = stringField(args, "path");

@@ -48,11 +48,15 @@ describe("Samantha TUI", () => {
     expect(parseTuiSlashCommand("/resume abc")).toEqual({ type: "resume", value: "abc" });
     expect(parseTuiSlashCommand("/save")).toEqual({ type: "save" });
     expect(parseTuiSlashCommand("/final")).toEqual({ type: "final" });
+    expect(parseTuiSlashCommand("/original on")).toEqual({ type: "original", enabled: true });
+    expect(parseTuiSlashCommand("/original off")).toEqual({ type: "original", enabled: false });
+    expect(parseTuiSlashCommand("/origin answer")).toEqual({ type: "original", show: true });
     expect(parseTuiSlashCommand("/clear")).toEqual({ type: "clear" });
     expect(parseTuiSlashCommand("/help")).toEqual({ type: "help" });
     expect(parseTuiSlashCommand("/exit")).toEqual({ type: "exit" });
     expect(TUI_COMMANDS).toContain("/model");
     expect(TUI_COMMANDS).toContain("/voice test");
     expect(TUI_COMMANDS).toContain("/voice debug");
+    expect(TUI_COMMANDS).toContain("/original");
   });
 });

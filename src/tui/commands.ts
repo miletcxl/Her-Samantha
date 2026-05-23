@@ -11,6 +11,7 @@ export type TuiSlashCommand =
   | { type: "resume"; value?: string }
   | { type: "save" }
   | { type: "final" }
+  | { type: "original"; enabled?: boolean; show?: boolean }
   | { type: "clear" }
   | { type: "help" }
   | { type: "exit" }
@@ -35,6 +36,8 @@ export const TUI_COMMANDS = [
   "/resume",
   "/save",
   "/final",
+  "/original",
+  "/origin answer",
   "/clear",
   "/help",
   "/exit"
@@ -80,6 +83,12 @@ export function parseTuiSlashCommand(input: string): TuiSlashCommand | undefined
   if (name === "resume") return { type: "resume", value };
   if (name === "save") return { type: "save" };
   if (name === "final") return { type: "final" };
+  if (name === "original" || name === "origin") {
+    if (value === "on") return { type: "original", enabled: true };
+    if (value === "off") return { type: "original", enabled: false };
+    if (value === "show" || value === "answer") return { type: "original", show: true };
+    return { type: "original" };
+  }
   if (name === "clear") return { type: "clear" };
   if (name === "help") return { type: "help" };
   if (name === "exit" || name === "quit") return { type: "exit" };
@@ -87,4 +96,4 @@ export function parseTuiSlashCommand(input: string): TuiSlashCommand | undefined
 }
 
 export const TUI_HELP_TEXT =
-  "/voice [on|off|test|debug]  /model [agent|narr|tts] <id>  /login  /provider list|use|test|delete  /session  /resume [id|path]  /save  /final  /clear  /help  /exit";
+  "/voice [on|off|test|debug]  /model [agent|narr|tts] <id>  /login  /provider list|use|test|delete  /session  /resume [id|path]  /save  /final  /original [on|off|show]  /clear  /help  /exit";

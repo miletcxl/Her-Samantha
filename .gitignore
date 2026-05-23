@@ -20,3 +20,5 @@ goal*.md
 npm.md
 new-api/data/
 new-api/logs/
+CHANGELOG.md
+how-to-write-readme.md
