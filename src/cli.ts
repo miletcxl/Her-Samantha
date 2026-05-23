@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import React from "react";
+import { render } from "ink";
 import { loadEnvFile } from "./config/envFile.js";
+import { hasNarrationEnv, hasTtsEnv } from "./providers/config.js";
 import { runDoctor } from "./doctor.js";
 import { renderTerminalSummary } from "./renderer/terminal.js";
+import { SamanthaTui } from "./tui/SamanthaTui.js";
 import { createSamanthaSession } from "./core/session.js";
 import type { RunOfflineOptions, RunPiTaskOptions } from "./core/types.js";
 
 async function main(argv: string[]): Promise<number> {
   await loadEnvFile();
+  await loadEnvFile(".samantha/.env.local", process.env, { overwrite: true });
 
   if (argv.includes("--help") || argv.includes("-h") || argv.length === 0) {
     process.stdout.write(helpText());
@@ -34,12 +39,35 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  if (parsed.command === "tui-pi") {
+    render(
+      React.createElement(SamanthaTui, {
+        runtime: "pi",
+        piPath: parsed.options.piPath,
+        piTimeoutMs: parsed.options.piTimeoutMs,
+        piSessionDir: parsed.options.piSessionDir,
+        piSession: parsed.options.piSession,
+        piContinue: parsed.options.piContinue,
+        piResume: parsed.options.piResume,
+        piFork: parsed.options.piFork,
+        voice: parsed.options.voice,
+        ttsProvider: parsed.options.ttsProvider,
+        narrationProvider: parsed.options.narrationProvider ?? (hasNarrationEnv() ? "openai-compatible" : "mock"),
+        saveArtifacts: parsed.options.saveArtifacts,
+        outDir: parsed.options.outDir,
+        locale: parsed.options.locale
+      })
+    );
+    return 0;
+  }
+
   return listenPi(parsed.options);
 }
 
 type ParsedCli =
   | { command: "doctor" }
   | { command: "run-offline"; options: RunOfflineOptions }
+  | { command: "tui-pi"; options: ListenPiOptions }
   | { command: "listen-pi"; options: ListenPiOptions };
 
 type ListenPiOptions = Omit<RunPiTaskOptions, "task"> & { task?: string };
@@ -52,6 +80,12 @@ function parseArgs(argv: string[]): ParsedCli {
 
   if (command === "listen" && maybeRuntimeOrFile === "pi") {
     return { command: "listen-pi", options: parseListenPiArgs([maybeFile, ...rest]) };
+  }
+  if (command === "tui" && maybeRuntimeOrFile !== "pi") {
+    return { command: "tui-pi", options: { ...parseListenPiArgs([maybeRuntimeOrFile, maybeFile, ...rest]), voice: parseTuiVoiceDefault([maybeRuntimeOrFile, maybeFile, ...rest]) } };
+  }
+  if (command === "tui") {
+    return { command: "tui-pi", options: { ...parseListenPiArgs([maybeFile, ...rest]), voice: parseTuiVoiceDefault([maybeFile, ...rest]) } };
   }
 
   if (command !== "run") {
@@ -91,6 +125,11 @@ function parseListenPiArgs(argsWithMaybeUndefined: Array<string | undefined>): L
   let task: string | undefined;
   let piReal = false;
   let piTimeoutMs: number | undefined;
+  let piSessionDir: string | undefined;
+  let piSession: string | undefined;
+  let piContinue = false;
+  let piResume = false;
+  let piFork: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -121,6 +160,35 @@ function parseListenPiArgs(argsWithMaybeUndefined: Array<string | undefined>): L
       index += 1;
       continue;
     }
+    if (arg === "--pi-session-dir") {
+      const value = args[index + 1];
+      if (!value) throw new Error("--pi-session-dir requires a directory.");
+      piSessionDir = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--pi-session") {
+      const value = args[index + 1];
+      if (!value) throw new Error("--pi-session requires a path or id.");
+      piSession = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--pi-continue") {
+      piContinue = true;
+      continue;
+    }
+    if (arg === "--pi-resume") {
+      piResume = true;
+      continue;
+    }
+    if (arg === "--pi-fork") {
+      const value = args[index + 1];
+      if (!value) throw new Error("--pi-fork requires a path or id.");
+      piFork = value;
+      index += 1;
+      continue;
+    }
     passthroughArgs.push(arg);
   }
 
@@ -129,15 +197,26 @@ function parseListenPiArgs(argsWithMaybeUndefined: Array<string | undefined>): L
     piPath,
     piReal,
     piTimeoutMs,
+    piSessionDir,
+    piSession,
+    piContinue,
+    piResume,
+    piFork,
     ...parseSharedOptions(passthroughArgs),
     locale: "zh-CN"
   };
 }
 
+function parseTuiVoiceDefault(argsWithMaybeUndefined: Array<string | undefined>): boolean {
+  const args = argsWithMaybeUndefined.filter((value): value is string => typeof value === "string");
+  if (args.includes("--no-voice")) return false;
+  return true;
+}
+
 function parseSharedOptions(args: string[]): Omit<RunOfflineOptions, "inputPath" | "locale"> {
   let voice = false;
-  let ttsProvider: "mock" | "mimo" = "mock";
-  let narrationProvider: "mock" | "openai-compatible" = "mock";
+  let ttsProvider: "mock" | "mimo" = hasTtsEnv() ? "mimo" : "mock";
+  let narrationProvider: "mock" | "openai-compatible" | undefined;
   let saveArtifacts = false;
   let outDir = "output";
 
@@ -242,7 +321,7 @@ async function runPiTaskOnce(options: RunPiTaskOptions): Promise<void> {
 }
 
 function helpText(): string {
-  return `Her-Samantha\n\nUsage:\n  samantha doctor\n  samantha run offline <file> [--tts mock|mimo] [--voice] [--save-artifacts] [--out output]\n  samantha run <file> [--tts mock|mimo] [--voice] [--save-artifacts]\n  samantha listen pi [--pi-path path] [--pi-real] [--pi-timeout-ms ms] [--task text] [--tts mock|mimo] [--voice] [--save-artifacts]\n\n`;
+  return `Her-Samantha\n\nUsage:\n  samantha doctor\n  samantha run offline <file> [--tts mock|mimo] [--voice] [--save-artifacts] [--out output]\n  samantha run <file> [--tts mock|mimo] [--voice] [--save-artifacts]\n  samantha listen pi [--pi-path path] [--pi-real] [--task text] [--tts mock|mimo] [--voice] [--save-artifacts]\n  samantha tui [pi] [--pi-path path] [--pi-session id|path] [--pi-session-dir dir] [--pi-continue] [--pi-resume] [--pi-fork id|path] [--tts mock|mimo] [--no-voice] [--save-artifacts]\n\n`;
 }
 
 main(process.argv.slice(2))

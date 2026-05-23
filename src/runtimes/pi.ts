@@ -1,14 +1,28 @@
 import { access } from "node:fs/promises";
-import { spawn, type SpawnOptions } from "node:child_process";
+import { existsSync } from "node:fs";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { delimiter, isAbsolute, join } from "node:path";
 import { EventBus } from "../core/events.js";
-import type { AgentRuntimeAdapter, AgentTraceEvent, RuntimeAdapterEvent, TaskExecutionResult } from "../core/types.js";
+import type {
+  AgentRuntimeAdapter,
+  AgentTraceEvent,
+  RuntimeAdapterEvent,
+  RuntimeCapabilities,
+  TaskExecutionResult
+} from "../core/types.js";
 
 export interface PiRuntimeAdapterOptions {
   piPath?: string;
   realExecution?: boolean;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  model?: string;
+  sessionDir?: string;
+  session?: string;
+  continueSession?: boolean;
+  resume?: boolean;
+  fork?: string;
 }
 
 export interface PiJsonExecutionResult {
@@ -25,17 +39,44 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly configuredPiPath?: string;
   private readonly realExecution: boolean;
   private readonly timeoutMs: number;
+  private readonly sessionOptions: PiSessionOptions;
   private resolvedPiPath?: string;
+  private rpc?: PiRpcClient;
+
+  private readonly model?: string;
 
   constructor(options: PiRuntimeAdapterOptions = {}) {
     this.configuredPiPath = options.piPath;
     this.realExecution = options.realExecution ?? false;
     this.timeoutMs = options.timeoutMs ?? readTimeoutMs(options.env ?? process.env);
     this.env = options.env ?? process.env;
+    this.model = options.model;
+    this.sessionOptions = {
+      sessionDir: options.sessionDir,
+      session: options.session,
+      continueSession: options.continueSession,
+      resume: options.resume,
+      fork: options.fork
+    };
   }
 
   subscribe(listener: (event: RuntimeAdapterEvent) => void): () => void {
     return this.bus.subscribe(listener);
+  }
+
+  getCapabilities(): RuntimeCapabilities {
+    return {
+      structuredEvents: true,
+      toolEvents: true,
+      permissionPrompts: true,
+      cancel: true,
+      resume: true,
+      streamingOutput: true,
+      sessionFiles: true,
+      rpc: true,
+      jsonPrintFallback: true,
+      modelSwitch: true
+    };
   }
 
   async start(): Promise<void> {
@@ -52,22 +93,15 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       if (!piPath) {
         throw new Error("PiRuntimeAdapter.start() must resolve piPath before sendTask().");
       }
-      this.bus.emit({ type: "status", message: "Starting Pi JSON mode..." });
-      const result = await executePiJsonPrint({
+      this.bus.emit({ type: "status", message: "Starting Pi RPC mode..." });
+      this.rpc ??= startPiRpc({
         piPath,
-        task: text,
-        timeoutMs: this.timeoutMs,
-        env: this.env
+        env: this.env,
+        model: this.model,
+        sessionOptions: this.sessionOptions,
+        onEvent: (event) => this.handleRpcEvent(event)
       });
-      if (result.timedOut) {
-        throw new Error(
-          `Pi JSON mode timed out after ${this.timeoutMs}ms. Real Pi model calls can take 60-120 seconds; retry with --pi-timeout-ms 120000 or 180000.`
-        );
-      }
-      if (result.exitCode !== 0) {
-        throw new Error(`Pi exited with code ${result.exitCode}: ${result.stderr.slice(0, 1000)}`);
-      }
-      return normalizePiJsonLines(text, result.stdout);
+      return await this.rpc.prompt(text, this.timeoutMs);
     }
 
     const message =
@@ -114,12 +148,230 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async cancel(): Promise<void> {
+    if (this.rpc) {
+      await this.rpc.abort();
+    }
     this.bus.emit({ type: "status", message: "Pi task cancellation requested." });
   }
 
   async dispose(): Promise<void> {
+    this.rpc?.dispose();
+    this.rpc = undefined;
     this.bus.emit({ type: "status", message: "Pi runtime adapter disposed." });
   }
+
+  private handleRpcEvent(event: unknown): void {
+    this.bus.emit({ type: "raw", sourceRuntime: "pi", event });
+    const normalized = normalizePiJsonEvent(event, -1);
+    if (normalized) {
+      this.bus.emit({ type: "trace", event: normalized });
+    }
+    if (isRecord(event) && event.type === "extension_ui_request") {
+      const message = stringField(event, "message") ?? stringField(event, "title") ?? "Pi requested input.";
+      const options = Array.isArray(event.options)
+        ? event.options.filter((value): value is string => typeof value === "string")
+        : undefined;
+      this.bus.emit({ type: "permission_prompt", message, options });
+    }
+  }
+}
+
+export interface PiRpcStartOptions {
+  piPath: string;
+  env?: NodeJS.ProcessEnv;
+  model?: string;
+  sessionOptions?: PiSessionOptions;
+  onEvent?: (event: unknown) => void;
+}
+
+export interface PiSessionOptions {
+  sessionDir?: string;
+  session?: string;
+  continueSession?: boolean;
+  resume?: boolean;
+  fork?: string;
+}
+
+export interface PiRpcClient {
+  prompt(message: string, timeoutMs: number): Promise<TaskExecutionResult>;
+  getState(timeoutMs?: number): Promise<unknown>;
+  abort(): Promise<void>;
+  sendUnsupportedConfigChange(kind: "model" | "provider", value: string): Promise<never>;
+  dispose(): void;
+}
+
+interface PendingRpcResponse {
+  command: string;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+class SpawnedPiRpcClient implements PiRpcClient {
+  private readonly pending = new Map<string, PendingRpcResponse>();
+  private readonly events: unknown[] = [];
+  private readonly process: ChildProcess;
+  private sequence = 0;
+  private activePrompt?: {
+    userTask: string;
+    resolve: (value: TaskExecutionResult) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  };
+
+  constructor(process: ChildProcess, private readonly onEvent?: (event: unknown) => void) {
+    if (!process.stdin || !process.stdout || !process.stderr) {
+      throw new Error("Pi RPC process stdin/stdout/stderr streams were not available.");
+    }
+    this.process = process;
+    attachJsonlReader(process.stdout, (event) => this.handleStdoutEvent(event));
+    process.stderr.setEncoding("utf8");
+    process.on("error", (error) => this.failAll(error instanceof Error ? error : new Error(String(error))));
+    process.on("exit", (code) => {
+      if (code !== 0 && this.activePrompt) {
+        this.activePrompt.reject(new Error(`Pi RPC process exited with code ${code}.`));
+      }
+    });
+  }
+
+  async prompt(message: string, timeoutMs: number): Promise<TaskExecutionResult> {
+    if (this.activePrompt) {
+      throw new Error("Pi RPC prompt is already running.");
+    }
+    this.events.length = 0;
+    await this.sendCommand("prompt", { message }, timeoutMs);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.activePrompt = undefined;
+        reject(
+          new Error(
+            `Pi RPC prompt timed out after ${timeoutMs}ms. Real Pi model calls can take 60-120 seconds; retry with --pi-timeout-ms 120000 or 180000.`
+          )
+        );
+      }, timeoutMs);
+      this.activePrompt = { userTask: message, resolve, reject, timer };
+    });
+  }
+
+  async getState(timeoutMs = 10_000): Promise<unknown> {
+    return await this.sendCommand("get_state", {}, timeoutMs);
+  }
+
+  async abort(): Promise<void> {
+    await this.sendCommand("abort", {}, 10_000);
+  }
+
+  async sendUnsupportedConfigChange(kind: "model" | "provider", value: string): Promise<never> {
+    await Promise.resolve();
+    throw new Error(`Pi RPC does not expose runtime ${kind} switching in this adapter yet: ${value}`);
+  }
+
+  dispose(): void {
+    this.failAll(new Error("Pi RPC client disposed."));
+    this.process.kill();
+  }
+
+  private sendCommand(command: string, body: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    const id = `samantha-${++this.sequence}`;
+    const payload = JSON.stringify({ id, type: command, ...body });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Pi RPC command ${command} timed out after ${timeoutMs}ms.`));
+      }, timeoutMs);
+      this.pending.set(id, { command, resolve, reject, timer });
+      const stdin = this.process.stdin;
+      if (!stdin) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error("Pi RPC process stdin stream was not available."));
+        return;
+      }
+      stdin.write(`${payload}\n`, "utf8");
+    });
+  }
+
+  private handleStdoutEvent(event: unknown): void {
+    this.onEvent?.(event);
+    if (isRecord(event) && event.type === "response" && typeof event.id === "string") {
+      const pending = this.pending.get(event.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(event.id);
+        if (event.success === false) {
+          pending.reject(new Error(stringField(event, "error") ?? `Pi RPC command ${pending.command} failed.`));
+        } else {
+          pending.resolve(event);
+        }
+      }
+      return;
+    }
+
+    this.events.push(event);
+    if (isRecord(event) && event.type === "agent_end" && this.activePrompt) {
+      clearTimeout(this.activePrompt.timer);
+      const prompt = this.activePrompt;
+      this.activePrompt = undefined;
+      prompt.resolve(normalizePiJsonEvents(prompt.userTask, this.events));
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+    if (this.activePrompt) {
+      clearTimeout(this.activePrompt.timer);
+      this.activePrompt.reject(error);
+      this.activePrompt = undefined;
+    }
+  }
+}
+
+export function startPiRpc(options: PiRpcStartOptions): PiRpcClient {
+  const env = createPiProcessEnv(options.env ?? process.env);
+  const child = spawn(options.piPath, buildPiRpcArgs(env, options.model, options.sessionOptions), buildPiRpcSpawnOptions(env));
+  return new SpawnedPiRpcClient(child, options.onEvent);
+}
+
+export function buildPiRpcArgs(env: NodeJS.ProcessEnv, model?: string, sessionOptions: PiSessionOptions = {}): string[] {
+  const args = ["--mode", "rpc"];
+  if (env.SAMANTHA_PI_PROVIDER) {
+    args.push("--provider", env.SAMANTHA_PI_PROVIDER);
+  }
+  const effectiveModel = model ?? env.SAMANTHA_PI_MODEL;
+  if (effectiveModel) {
+    args.push("--model", effectiveModel);
+  }
+  appendPiSystemPrompt(args);
+  appendPiSessionArgs(args, sessionOptions);
+  return args;
+}
+
+const SAMANTHA_PI_SYSTEM_PROMPT_PATH = ".samantha/pi-system-prompt.md";
+
+function appendPiSystemPrompt(args: string[]): void {
+  if (existsSync(SAMANTHA_PI_SYSTEM_PROMPT_PATH)) {
+    args.push("--append-system-prompt", SAMANTHA_PI_SYSTEM_PROMPT_PATH);
+  }
+}
+
+function appendPiSessionArgs(args: string[], options: PiSessionOptions): void {
+  if (options.sessionDir) args.push("--session-dir", options.sessionDir);
+  if (options.session) args.push("--session", options.session);
+  if (options.continueSession) args.push("--continue");
+  if (options.resume) args.push("--resume");
+  if (options.fork) args.push("--fork", options.fork);
+}
+
+export function buildPiRpcSpawnOptions(env: NodeJS.ProcessEnv): SpawnOptions {
+  return {
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true
+  };
 }
 
 export async function executePiJsonPrint(options: {
@@ -207,7 +459,10 @@ function readTimeoutMs(env: NodeJS.ProcessEnv): number {
 }
 
 export function normalizePiJsonLines(userTask: string, stdout: string): TaskExecutionResult {
-  const events = parsePiJsonLines(stdout);
+  return normalizePiJsonEvents(userTask, parsePiJsonLines(stdout));
+}
+
+export function normalizePiJsonEvents(userTask: string, events: unknown[]): TaskExecutionResult {
   const trace: AgentTraceEvent[] = [];
   let finalAnswer = "";
   let status: "completed" | "failed" | "aborted" | "partial" = "partial";
@@ -398,6 +653,40 @@ function stringField(value: unknown, field: string): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function attachJsonlReader(stream: NodeJS.ReadableStream, onEvent: (event: unknown) => void): void {
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+
+  stream.on("data", (chunk: Buffer | string) => {
+    buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const rawLine = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+      if (line.trim().length > 0) {
+        onEvent(parseJsonLine(line));
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+  });
+
+  stream.on("end", () => {
+    const tail = buffer + decoder.end();
+    if (tail.trim().length > 0) {
+      onEvent(parseJsonLine(tail));
+    }
+  });
+}
+
+function parseJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    return { type: "parse_error", raw: line.slice(0, 500) };
+  }
 }
 
 export async function resolvePiPath(options: {

@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 export interface LoadEnvFileResult {
   loaded: boolean;
@@ -6,7 +7,11 @@ export interface LoadEnvFileResult {
   keys: string[];
 }
 
-export async function loadEnvFile(path = ".env", env: NodeJS.ProcessEnv = process.env): Promise<LoadEnvFileResult> {
+export async function loadEnvFile(
+  path = ".env",
+  env: NodeJS.ProcessEnv = process.env,
+  options: { overwrite?: boolean } = {}
+): Promise<LoadEnvFileResult> {
   let content: string;
   try {
     content = await readFile(path, "utf8");
@@ -20,13 +25,19 @@ export async function loadEnvFile(path = ".env", env: NodeJS.ProcessEnv = proces
   const parsed = parseEnvFile(content);
   const keys: string[] = [];
   for (const [key, value] of Object.entries(parsed)) {
-    if (env[key] === undefined) {
+    if (options.overwrite || env[key] === undefined) {
       env[key] = value;
       keys.push(key);
     }
   }
 
   return { loaded: true, path, keys };
+}
+
+export async function appendToEnvFile(path: string, key: string, value: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const escaped = value.includes('"') ? `'${value}'` : `"${value}"`;
+  await appendFile(path, `${key}=${escaped}\n`, "utf8");
 }
 
 export function parseEnvFile(content: string): Record<string, string> {

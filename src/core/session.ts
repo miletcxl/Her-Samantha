@@ -6,7 +6,7 @@ import { createFallbackNarration } from "../narration/fallback.js";
 import { collectNarrationPolicyWarnings } from "../narration/policy.js";
 import { createMockNarration } from "../providers/mockNarration.js";
 import { synthesizeMockTts } from "../providers/mockTts.js";
-import { readMimoTtsConfig, readOpenAICompatibleNarrationConfig } from "../providers/config.js";
+import { hasNarrationEnv, readNarrationConfigFromRegistry, readTtsConfigFromRegistry } from "../providers/config.js";
 import { synthesizeMimoTts } from "../providers/mimoTts.js";
 import { createOpenAICompatibleNarration } from "../providers/openaiCompatibleNarration.js";
 import { createOfflineExecutionResult, loadOfflineTraceFixture } from "../runtimes/offline.js";
@@ -28,6 +28,7 @@ import type {
 export function createSamanthaSession(): SamanthaSession {
   const bus = new EventBus<SamanthaEvent>();
   let state = createInitialState();
+  let activeCancel: (() => Promise<void>) | undefined;
 
   function emit(event: SamanthaEvent): void {
     state = reduceState(state, event);
@@ -37,6 +38,11 @@ export function createSamanthaSession(): SamanthaSession {
   return {
     subscribe: (listener) => bus.subscribe(listener),
     getState: () => state,
+    cancel: async () => {
+      if (activeCancel) {
+        await activeCancel();
+      }
+    },
     runOffline: async (options): Promise<RunOfflineResult> => {
       try {
         state = createInitialState();
@@ -48,7 +54,7 @@ export function createSamanthaSession(): SamanthaSession {
         const completed = await completeExecution(execution, {
           voice: options.voice,
           ttsProvider: options.ttsProvider,
-          narrationProvider: options.narrationProvider ?? "mock",
+          narrationProvider: options.narrationProvider ?? (hasNarrationEnv() ? "openai-compatible" : "mock"),
           saveArtifacts: options.saveArtifacts,
           outDir: options.outDir,
           locale: options.locale ?? "zh-CN"
@@ -76,8 +82,14 @@ export function createSamanthaSession(): SamanthaSession {
         const adapter = new PiRuntimeAdapter({
           piPath: options.piPath,
           realExecution: options.piReal,
-          timeoutMs: options.piTimeoutMs
+          timeoutMs: options.piTimeoutMs,
+          sessionDir: options.piSessionDir,
+          session: options.piSession,
+          continueSession: options.piContinue,
+          resume: options.piResume,
+          fork: options.piFork
         });
+        activeCancel = () => adapter.cancel();
         const unsubscribe = adapter.subscribe((event) => {
           if (event.type === "status") {
             emit({ type: "runtime:status", phase: "pi", message: event.message });
@@ -93,7 +105,7 @@ export function createSamanthaSession(): SamanthaSession {
           const completed = await completeExecution(execution, {
             voice: options.voice,
             ttsProvider: options.ttsProvider,
-            narrationProvider: options.narrationProvider ?? "mock",
+            narrationProvider: options.narrationProvider ?? (hasNarrationEnv() ? "openai-compatible" : "mock"),
             saveArtifacts: options.saveArtifacts,
             outDir: options.outDir,
             locale: options.locale ?? "zh-CN"
@@ -102,6 +114,7 @@ export function createSamanthaSession(): SamanthaSession {
         } finally {
           unsubscribe();
           await adapter.dispose();
+          activeCancel = undefined;
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -184,7 +197,7 @@ async function createNarration(
     const narration =
       provider === "mock"
         ? createMockNarration(input)
-        : await createOpenAICompatibleNarration(input, readOpenAICompatibleNarrationConfig());
+        : await createOpenAICompatibleNarration(input, await readNarrationConfigFromRegistry());
     return {
       ...narration,
       warnings: [...narration.warnings, ...collectNarrationPolicyWarnings(narration.spokenSummary)]
@@ -256,14 +269,14 @@ async function runVoiceIfNeeded(
     ? join(options.outDir, runId, `samantha_summary.${outputFormat}`)
     : join(await mkdtemp(join(tmpdir(), "her-samantha-")), `samantha_summary.${outputFormat}`);
 
-  const voice =
+const voice =
     options.ttsProvider === "mock"
       ? await synthesizeMockTts({
           spokenSummary,
           outputPath: audioPath,
           temporary: !options.saveArtifacts
         })
-      : await synthesizeMimoTtsWithFallback(spokenSummary, audioPath, !options.saveArtifacts);
+      : await synthesizeMimoTtsWithFallback(spokenSummary, audioPath, !options.saveArtifacts, 60_000);
 
   if (!options.saveArtifacts && voice.audioPath) {
     await rm(voice.audioPath, { force: true });
@@ -275,15 +288,20 @@ async function runVoiceIfNeeded(
 async function synthesizeMimoTtsWithFallback(
   spokenSummary: string,
   outputPath: string,
-  temporary: boolean
+  temporary: boolean,
+  timeoutMs: number
 ): Promise<VoiceOutputResult> {
   try {
-    return await synthesizeMimoTts({
-      spokenSummary,
-      outputPath,
-      temporary,
-      config: readMimoTtsConfig()
-    });
+    return await withTimeout(
+      synthesizeMimoTts({
+        spokenSummary,
+        outputPath,
+        temporary,
+        config: await readTtsConfigFromRegistry()
+      }),
+      timeoutMs,
+      `Mimo TTS timed out after ${timeoutMs}ms.`
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -295,6 +313,20 @@ async function synthesizeMimoTtsWithFallback(
       played: false,
       error: message
     };
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

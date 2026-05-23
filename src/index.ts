@@ -8,6 +8,7 @@ export type {
   NarrationResult,
   OfflineTraceFixture,
   RuntimeAdapterEvent,
+  RuntimeCapabilities,
   SamanthaCliOptions,
   SamanthaEvent,
   SamanthaSession,

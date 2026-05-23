@@ -69,8 +69,20 @@ function createGenericMockNarration(input: NarrationInput): NarrationResult {
       .at(-1) ??
     "Task reached the narration stage.";
 
+  const stepCount = input.trace.filter((e) => e.type !== "error" && e.type !== "aborted").length;
+  const errorCount = input.trace.filter((e) => e.type === "error").length;
+
+  const spokenSummary =
+    input.finalResult?.status === "failed"
+      ? "任务未能完成。Pi 在处理过程中遇到了问题，建议按 ctrl+alt+2 查看 Detail 了解详情。"
+      : input.finalResult?.status === "aborted"
+        ? "任务已被中断。Pi 没有完整执行完你的请求，已完成的步骤保留在 Detail 中。"
+        : errorCount > 0
+          ? `任务基本完成，但过程中出现了 ${errorCount} 个问题。你可以按 ctrl+alt+2 查看具体细节。`
+          : `任务已完成。Pi 执行了 ${stepCount} 个步骤，你可以在左侧对话中查看具体回复。`;
+
   return {
-    spokenSummary: highLevelSummary,
+    spokenSummary,
     textDetail: {
       status: input.finalResult?.status ?? "partial",
       userTask: input.userTask,

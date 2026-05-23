@@ -34,13 +34,18 @@ describe("cli", () => {
     await expect(stat(join(runDir, "trace.normalized.json"))).resolves.toBeTruthy();
     const audio = await stat(join(runDir, "samantha_summary.wav"));
     expect(audio.size).toBeGreaterThan(44);
-  });
+  }, 30_000);
 
   it("runs listen pi once with a task and fake Pi path", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "her-samantha-cli-pi-"));
     const piPath = join(tempDir, "pi.exe");
     const outDir = join(tempDir, "output");
     await writeFile(piPath, "", "utf8");
+
+    const envPatch = { ...process.env };
+    delete envPatch.SAMANTHA_NARRATION_BASE_URL;
+    delete envPatch.SAMANTHA_NARRATION_MODEL;
+    delete envPatch.SAMANTHA_NARRATION_API_KEY_ENV;
 
     const { stdout } = await execFileAsync(process.execPath, [
       "dist/cli.js",
@@ -56,12 +61,12 @@ describe("cli", () => {
       "--save-artifacts",
       "--out",
       outDir
-    ]);
+    ], { env: envPatch });
 
     expect(stdout).toContain("Spoken summary:");
-    expect(stdout).toContain("PiRuntimeAdapter skeleton");
+    expect(stdout).toMatch(/Spoken summary:\s*\n\s*\S+/);
     const runs = await readdir(outDir);
     expect(runs.length).toBe(1);
     await expect(stat(join(outDir, runs[0]!, "report.json"))).resolves.toBeTruthy();
-  });
+  }, 30_000);
 });

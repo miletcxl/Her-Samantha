@@ -5,8 +5,10 @@ output/
 .env
 .env.local
 .env.*
+.samantha/.env.local
 env.json
 .claude/
+.samantha/
 
 # Planning and private working notes
 SPEC.md

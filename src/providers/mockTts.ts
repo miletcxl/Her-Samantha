@@ -20,7 +20,7 @@ export async function synthesizeMockTts(options: {
   }
 
   await mkdir(dirname(options.outputPath), { recursive: true });
-  await writeFile(options.outputPath, createSilentWav());
+  await writeFile(options.outputPath, createToneWav());
 
   return {
     requested: true,
@@ -30,13 +30,14 @@ export async function synthesizeMockTts(options: {
     audioPath: options.outputPath,
     temporary: options.temporary,
     played: false,
-    durationMs: 120
+    durationMs: 450
   };
 }
 
-function createSilentWav(): Buffer {
-  const sampleRate = 8000;
-  const durationSeconds = 0.12;
+function createToneWav(): Buffer {
+  const sampleRate = 16_000;
+  const durationSeconds = 0.45;
+  const frequency = 660;
   const sampleCount = Math.floor(sampleRate * durationSeconds);
   const dataSize = sampleCount * 2;
   const buffer = Buffer.alloc(44 + dataSize);
@@ -54,6 +55,13 @@ function createSilentWav(): Buffer {
   buffer.writeUInt16LE(16, 34);
   buffer.write("data", 36);
   buffer.writeUInt32LE(dataSize, 40);
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const progress = index / sampleCount;
+    const fade = Math.min(1, progress * 12, (1 - progress) * 12);
+    const sample = Math.sin((2 * Math.PI * frequency * index) / sampleRate) * 0.25 * fade;
+    buffer.writeInt16LE(Math.round(sample * 32767), 44 + index * 2);
+  }
 
   return buffer;
 }

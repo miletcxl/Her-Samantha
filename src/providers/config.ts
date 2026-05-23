@@ -1,15 +1,22 @@
-export interface OpenAICompatibleNarrationConfig {
-  baseUrl: string;
-  model: string;
-  apiKey: string;
+import type { MimoTtsConfig, OpenAICompatibleNarrationConfig } from "./registry.js";
+import { loadProviderRegistry, resolveNarrationConfig, resolveTtsConfig } from "./registry.js";
+
+export type { MimoTtsConfig, OpenAICompatibleNarrationConfig };
+
+export function hasTtsEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    typeof env.SAMANTHA_TTS_BASE_URL === "string" &&
+    typeof env.SAMANTHA_TTS_MODEL === "string" &&
+    typeof env.SAMANTHA_TTS_API_KEY_ENV === "string"
+  );
 }
 
-export interface MimoTtsConfig {
-  baseUrl: string;
-  model: string;
-  voiceDescription: string;
-  apiKey: string;
-  outputFormat: "mp3" | "wav";
+export function hasNarrationEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    typeof env.SAMANTHA_NARRATION_BASE_URL === "string" &&
+    typeof env.SAMANTHA_NARRATION_MODEL === "string" &&
+    typeof env.SAMANTHA_NARRATION_API_KEY_ENV === "string"
+  );
 }
 
 export function readOpenAICompatibleNarrationConfig(env: NodeJS.ProcessEnv = process.env): OpenAICompatibleNarrationConfig {
@@ -53,4 +60,26 @@ export function readMimoTtsConfig(env: NodeJS.ProcessEnv = process.env): MimoTts
     apiKey,
     outputFormat
   };
+}
+
+export async function readNarrationConfigFromRegistry(
+  env: NodeJS.ProcessEnv = process.env
+): Promise<OpenAICompatibleNarrationConfig> {
+  const registry = await loadProviderRegistry();
+  if (registry) {
+    const resolved = resolveNarrationConfig(registry, env);
+    if (resolved) return resolved;
+  }
+  return readOpenAICompatibleNarrationConfig(env);
+}
+
+export async function readTtsConfigFromRegistry(
+  env: NodeJS.ProcessEnv = process.env
+): Promise<MimoTtsConfig> {
+  const registry = await loadProviderRegistry();
+  if (registry) {
+    const resolved = resolveTtsConfig(registry, env);
+    if (resolved) return resolved;
+  }
+  return readMimoTtsConfig(env);
 }

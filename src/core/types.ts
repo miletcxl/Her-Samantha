@@ -77,10 +77,25 @@ export interface TaskExecutionResult {
 export type RuntimeAdapterEvent =
   | { type: "status"; message: string }
   | { type: "trace"; event: AgentTraceEvent }
-  | { type: "permission_prompt"; message: string; options?: string[] };
+  | { type: "permission_prompt"; message: string; options?: string[] }
+  | { type: "raw"; sourceRuntime: RuntimeName; event: unknown };
+
+export interface RuntimeCapabilities {
+  structuredEvents: boolean;
+  toolEvents: boolean;
+  permissionPrompts: boolean;
+  cancel: boolean;
+  resume: boolean;
+  streamingOutput: boolean;
+  sessionFiles: boolean;
+  rpc: boolean;
+  jsonPrintFallback: boolean;
+  modelSwitch: boolean;
+}
 
 export interface AgentRuntimeAdapter {
   name: RuntimeName;
+  getCapabilities(): RuntimeCapabilities;
   start(): Promise<void>;
   sendTask(text: string): Promise<TaskExecutionResult>;
   cancel(): Promise<void>;
@@ -219,6 +234,11 @@ export interface RunPiTaskOptions {
   piPath?: string;
   piReal?: boolean;
   piTimeoutMs?: number;
+  piSessionDir?: string;
+  piSession?: string;
+  piContinue?: boolean;
+  piResume?: boolean;
+  piFork?: string;
   voice: boolean;
   ttsProvider: "mock" | "mimo";
   narrationProvider?: "mock" | "openai-compatible";
@@ -238,6 +258,7 @@ export interface RunPiTaskResult {
 export interface SamanthaSession {
   runOffline(options: RunOfflineOptions): Promise<RunOfflineResult>;
   runPiTask(options: RunPiTaskOptions): Promise<RunPiTaskResult>;
+  cancel(): Promise<void>;
   subscribe(listener: (event: SamanthaEvent) => void): () => void;
   getState(): SamanthaState;
 }
