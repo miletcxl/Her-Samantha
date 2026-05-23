@@ -30,6 +30,10 @@
 
 In the film *Her*, Samantha is not just a voice assistant — she is calm, present, and translates computation into something human-facing.
 
+<p align="center">
+  <img src="./asset/figure/film.png" alt="Her film mood" width="60%" />
+</p>
+
 Her-Samantha brings the same idea to agent tooling:
 
 | Without Samantha | With Samantha |
@@ -198,6 +202,10 @@ examples/        offline trace fixtures
 ## 为什么需要它？
 
 电影《Her》中的 Samantha 不只一个语音助手——她冷静、在场、能把计算翻译成人能理解的东西。
+
+<p align="center">
+  <img src="./asset/figure/film.png" alt="Her 电影氛围" width="60%" />
+</p>
 
 Her-Samantha 把同样的理念带到了 agent 工具链：
 
