@@ -101,7 +101,15 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         sessionOptions: this.sessionOptions,
         onEvent: (event) => this.handleRpcEvent(event)
       });
-      return await this.rpc.prompt(text, this.timeoutMs);
+      try {
+        return await this.rpc.prompt(text, this.timeoutMs);
+      } catch (error) {
+        if (isPiRpcPromptTimeout(error)) {
+          this.rpc.dispose();
+          this.rpc = undefined;
+        }
+        throw error;
+      }
     }
 
     const message =
@@ -174,6 +182,10 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       this.bus.emit({ type: "permission_prompt", message, options });
     }
   }
+}
+
+export function isPiRpcPromptTimeout(error: unknown): boolean {
+  return error instanceof Error && /^Pi RPC prompt timed out after \d+ms\./.test(error.message);
 }
 
 export interface PiRpcStartOptions {

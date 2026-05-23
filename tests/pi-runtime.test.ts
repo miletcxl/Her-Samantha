@@ -11,6 +11,7 @@ import {
   buildPiJsonPrintArgs,
   buildPiSpawnOptions,
   createPiProcessEnv,
+  isPiRpcPromptTimeout,
   normalizePiJsonLines,
   PiRuntimeAdapter,
   resolvePiPath
@@ -160,6 +161,12 @@ describe("Pi runtime adapter skeleton", () => {
       jsonPrintFallback: true,
       modelSwitch: true
     });
+  });
+
+  it("detects Pi RPC prompt timeout errors", () => {
+    expect(isPiRpcPromptTimeout(new Error("Pi RPC prompt timed out after 120000ms. Real Pi model calls can take 60-120 seconds; retry with --pi-timeout-ms 120000 or 180000."))).toBe(true);
+    expect(isPiRpcPromptTimeout(new Error("Pi RPC command prompt timed out after 120000ms."))).toBe(false);
+    expect(isPiRpcPromptTimeout("Pi RPC prompt timed out after 120000ms.")).toBe(false);
   });
 
   it("uses Pi RPC spawn settings with stdin pipe", () => {

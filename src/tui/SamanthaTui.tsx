@@ -917,10 +917,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
             {running ? (
               <Text color="gray">{">> turn locked; waiting for Samantha..."}</Text>
             ) : audioGenerating ? (
-              <Box flexDirection="column">
-                <Text color="yellow">voice generating in background...</Text>
-                <InputLine value={input} cursorIndex={cursorIndex} pulse={pulse} />
-              </Box>
+              <Text color="yellow">{">> voice locked; generating audio..."}</Text>
             ) : (
               <InputLine value={input} cursorIndex={cursorIndex} pulse={pulse} />
             )}
