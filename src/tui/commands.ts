@@ -3,13 +3,14 @@ export type ModelKind = "agent" | "narr" | "tts";
 export type ProviderAction = "list" | "use" | "test" | "delete";
 
 export type TuiSlashCommand =
-  | { type: "voice"; enabled?: boolean; test?: boolean }
+  | { type: "voice"; enabled?: boolean; test?: boolean; debug?: boolean }
   | { type: "model"; kind?: ModelKind; value?: string }
   | { type: "provider"; action: ProviderAction; capability?: string; providerName?: string }
   | { type: "login"; value?: string }
   | { type: "session" }
   | { type: "resume"; value?: string }
   | { type: "save" }
+  | { type: "final" }
   | { type: "clear" }
   | { type: "help" }
   | { type: "exit" }
@@ -20,6 +21,7 @@ export const TUI_COMMANDS = [
   "/voice on",
   "/voice off",
   "/voice test",
+  "/voice debug",
   "/model",
   "/model agent",
   "/model narr",
@@ -32,6 +34,7 @@ export const TUI_COMMANDS = [
   "/session",
   "/resume",
   "/save",
+  "/final",
   "/clear",
   "/help",
   "/exit"
@@ -48,6 +51,7 @@ export function parseTuiSlashCommand(input: string): TuiSlashCommand | undefined
     if (value === "on") return { type: "voice", enabled: true };
     if (value === "off") return { type: "voice", enabled: false };
     if (value === "test") return { type: "voice", test: true };
+    if (value === "debug") return { type: "voice", debug: true };
     return { type: "voice" };
   }
   if (name === "model") {
@@ -75,6 +79,7 @@ export function parseTuiSlashCommand(input: string): TuiSlashCommand | undefined
   if (name === "session") return { type: "session" };
   if (name === "resume") return { type: "resume", value };
   if (name === "save") return { type: "save" };
+  if (name === "final") return { type: "final" };
   if (name === "clear") return { type: "clear" };
   if (name === "help") return { type: "help" };
   if (name === "exit" || name === "quit") return { type: "exit" };
@@ -82,4 +87,4 @@ export function parseTuiSlashCommand(input: string): TuiSlashCommand | undefined
 }
 
 export const TUI_HELP_TEXT =
-  "/voice [on|off|test]  /model [agent|narr|tts] <id>  /login  /provider list|use|test|delete  /session  /resume [id|path]  /save  /clear  /help  /exit";
+  "/voice [on|off|test|debug]  /model [agent|narr|tts] <id>  /login  /provider list|use|test|delete  /session  /resume [id|path]  /save  /final  /clear  /help  /exit";

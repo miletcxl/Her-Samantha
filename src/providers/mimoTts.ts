@@ -9,6 +9,7 @@ export async function synthesizeMimoTts(options: {
   temporary: boolean;
   config: MimoTtsConfig;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<VoiceOutputResult> {
   if (options.spokenSummary.length === 0) {
     return createFailure(options.temporary, "spokenSummary is empty.");
@@ -19,6 +20,7 @@ export async function synthesizeMimoTts(options: {
   try {
     const response = await fetcher(`${options.config.baseUrl}/chat/completions`, {
       method: "POST",
+      signal: options.signal,
       headers: {
         "content-type": "application/json",
         "api-key": options.config.apiKey

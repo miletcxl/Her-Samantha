@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -66,9 +66,11 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
   const adapterRef = useRef<PiRuntimeAdapter | undefined>(undefined);
   const mountedRef = useRef(true);
   const temporaryAudioPathsRef = useRef<string[]>([]);
+  const turnAbortRef = useRef<AbortController | undefined>(undefined);
   const [input, setInput] = useState("");
+  const [cursorIndex, setCursorIndex] = useState(0);
   const [conversation, setConversation] = useState<ConversationEntry[]>([
-    { role: "system", text: "Her-Samantha Pi harness shell started." }
+    { role: "system", text: "Her-Samantha shell started." }
   ]);
   const [trace, setTrace] = useState<AgentTraceEvent[]>([]);
   const [summary, setSummary] = useState("No summary yet.");
@@ -77,6 +79,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
   const [risk, setRisk] = useState("Risk: none");
   const [status, setStatus] = useState("Starting Pi RPC...");
   const [running, setRunning] = useState(false);
+  const [audioGenerating, setAudioGenerating] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(props.voice);
   const [voiceStatus, setVoiceStatus] = useState("idle");
   const [sessionLabel, setSessionLabel] = useState(props.piSession ?? (props.piContinue ? "continue" : "new"));
@@ -88,8 +91,10 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     (props.ttsProvider === "mimo" ? "mimo-v2.5-tts-voicedesign" : "auto"));
   const [expandedPanel, setExpandedPanel] = useState<RightPanel>("none");
   const [lastAudioPath, setLastAudioPath] = useState<string | undefined>();
+  const [lastVoiceResult, setLastVoiceResult] = useState<VoiceOutputResult | undefined>();
   const [pulse, setPulse] = useState(0);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [conversationScrollOffset, setConversationScrollOffset] = useState(0);
   const [registry, setRegistry] = useState<ProviderRegistry | null>(null);
   const [loginWizard, setLoginWizard] = useState<LoginWizardState>({ step: "idle" });
 
@@ -132,6 +137,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     void startRuntime({ session: props.piSession, resume: props.piResume, continueSession: props.piContinue, fork: props.piFork });
     return () => {
       mountedRef.current = false;
+      turnAbortRef.current?.abort();
       void adapterRef.current?.dispose();
       for (const path of temporaryAudioPathsRef.current) {
         void rm(path, { force: true });
@@ -146,9 +152,20 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
         syncModelsFromRegistry(reg);
       }
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const shouldAnimate =
+      running ||
+      audioGenerating ||
+      voiceStatus === "generating" ||
+      voiceStatus === "playing" ||
+      voiceStatus === "waiting for Pi" ||
+      input.length > 0;
+    if (!shouldAnimate) return;
     const timer = setInterval(() => setPulse((value) => (value + 1) % 4), 280);
     return () => clearInterval(timer);
-  }, []);
+  }, [input.length, running, audioGenerating, voiceStatus]);
 
   function syncModelsFromRegistry(reg: ProviderRegistry): void {
     if (reg.narration) {
@@ -163,24 +180,65 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
 
   const selectionOptions = useMemo(() => getSelectionOptions(input, registry, agentModel, narrationModel, ttsModel), [input, registry, agentModel, narrationModel, ttsModel]);
 
+  useEffect(() => {
+    setCursorIndex((index) => Math.min(index, input.length));
+  }, [input.length]);
+
+  function replaceInput(value: string): void {
+    setInput(value);
+    setCursorIndex(value.length);
+  }
+
+  function clearInput(): void {
+    replaceInput("");
+  }
+
+  function insertInput(value: string): void {
+    setInput((current) => `${current.slice(0, cursorIndex)}${value}${current.slice(cursorIndex)}`);
+    setCursorIndex((index) => index + value.length);
+  }
+
+  function backspaceInput(): void {
+    if (cursorIndex <= 0) return;
+    setInput((current) => `${current.slice(0, cursorIndex - 1)}${current.slice(cursorIndex)}`);
+    setCursorIndex((index) => Math.max(0, index - 1));
+  }
+
+  function deleteInput(): void {
+    setInput((current) => {
+      if (cursorIndex >= current.length) return current;
+      return `${current.slice(0, cursorIndex)}${current.slice(cursorIndex + 1)}`;
+    });
+  }
+
+  function moveCursor(delta: number): void {
+    setCursorIndex((index) => Math.min(input.length, Math.max(0, index + delta)));
+  }
+
   useInput((inputChar, key) => {
     if (loginWizard.step !== "idle" && key.escape) {
       setLoginWizard({ step: "idle" });
-      setInput("");
+      clearInput();
       push({ role: "system", text: "Login wizard cancelled." });
       return;
     }
     if (loginWizard.step !== "idle" && key.return) {
       const text = input.trim();
-      setInput("");
+      clearInput();
       if (text) void advanceWizard(text);
       return;
     }
     if (loginWizard.step !== "idle") {
-      if (key.backspace || key.delete) {
-        setInput((value) => value.slice(0, -1));
+      if (key.leftArrow) {
+        moveCursor(-1);
+      } else if (key.rightArrow) {
+        moveCursor(1);
+      } else if (key.backspace) {
+        backspaceInput();
+      } else if (key.delete) {
+        deleteInput();
       } else if (!key.ctrl && !key.meta && inputChar) {
-        setInput((value) => `${value}${inputChar}`);
+        insertInput(inputChar);
       }
       return;
     }
@@ -197,9 +255,9 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       const selected = selectionOptions[suggestionIndex % selectionOptions.length];
       if (selected) {
         if (selected.action === "complete") {
-          setInput(selected.value);
+          replaceInput(selected.value);
         } else {
-          setInput("");
+          clearInput();
           void submit(selected.value);
         }
         setSuggestionIndex(0);
@@ -209,53 +267,86 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     if (selectionOptions.length > 0 && key.tab) {
       const selected = selectionOptions[suggestionIndex % selectionOptions.length];
       if (selected) {
-        setInput(selected.action === "complete" ? selected.value : selected.label);
+        replaceInput(selected.action === "complete" ? selected.value : selected.label);
       }
+      return;
+    }
+    if (selectionOptions.length > 0 && key.escape) {
+      clearInput();
+      setSuggestionIndex(0);
+      return;
+    }
+    if (!(running || audioGenerating) && input.length > 0 && key.escape) {
+      clearInput();
+      setSuggestionIndex(0);
+      setStatus("Input cleared.");
+      return;
+    }
+    if (!(running || audioGenerating) && key.leftArrow) {
+      moveCursor(-1);
+      return;
+    }
+    if (!(running || audioGenerating) && key.rightArrow) {
+      moveCursor(1);
+      return;
+    }
+    if (selectionOptions.length === 0 && key.upArrow) {
+      setConversationScrollOffset((value) => Math.min(maxConversationScrollOffset(conversation.length), value + 1));
+      return;
+    }
+    if (selectionOptions.length === 0 && key.downArrow) {
+      setConversationScrollOffset((value) => Math.max(0, value - 1));
       return;
     }
 
     if (key.escape) {
+      turnAbortRef.current?.abort();
       void adapterRef.current?.cancel();
       setStatus("Cancel requested.");
+      setVoiceStatus("cancelled");
       return;
     }
     if (key.return) {
       const text = input.trim();
-      if (!text || running) return;
-      setInput("");
+      if (!text || running || audioGenerating) return;
+      clearInput();
       void submit(text);
       return;
     }
-    if (!running && input.length === 0 && isControlAltShortcut(inputChar, key, "1")) {
+    if (!(running || audioGenerating) && input.length === 0 && isPanelShortcut(inputChar, key, "1")) {
       setExpandedPanel((panel) => (panel === "summary" ? "none" : "summary"));
       return;
     }
-    if (!running && input.length === 0 && isControlAltShortcut(inputChar, key, "2")) {
+    if (!(running || audioGenerating) && input.length === 0 && isPanelShortcut(inputChar, key, "2")) {
       setExpandedPanel((panel) => (panel === "detail" ? "none" : "detail"));
       return;
     }
-    if (!running && input.length === 0 && isControlAltShortcut(inputChar, key, "3")) {
+    if (!(running || audioGenerating) && input.length === 0 && isPanelShortcut(inputChar, key, "3")) {
       setExpandedPanel((panel) => (panel === "final" ? "none" : "final"));
       return;
     }
-    if (!running && input.length === 0 && isControlAltShortcut(inputChar, key, "4")) {
+    if (!(running || audioGenerating) && input.length === 0 && isPanelShortcut(inputChar, key, "4")) {
       setExpandedPanel((panel) => (panel === "risk" ? "none" : "risk"));
       return;
     }
-    if (!running && input.length === 0 && isControlAltShortcut(inputChar, key, "q")) {
+    if (!(running || audioGenerating) && input.length === 0 && isPanelShortcut(inputChar, key, "q")) {
       setExpandedPanel("none");
       return;
     }
-    if (!running && input.length === 0 && isControlAltShortcut(inputChar, key, "v")) {
+    if (!(running || audioGenerating) && input.length === 0 && isPanelShortcut(inputChar, key, "v")) {
       void replayVoice();
       return;
     }
-    if ((key.backspace || key.delete) && !running) {
-      setInput((value) => value.slice(0, -1));
+    if (key.backspace && !(running || audioGenerating)) {
+      backspaceInput();
       return;
     }
-    if (!key.ctrl && !key.meta && inputChar && !running) {
-      setInput((value) => `${value}${inputChar}`);
+    if (key.delete && !(running || audioGenerating)) {
+      deleteInput();
+      return;
+    }
+    if (!key.ctrl && !key.meta && inputChar && !(running || audioGenerating)) {
+      insertInput(inputChar);
       setSuggestionIndex(0);
     }
   });
@@ -416,24 +507,62 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
 
     setRunning(true);
     setVoiceStatus(voiceEnabled ? "waiting for Pi" : "off");
+    const turnAbort = new AbortController();
+    turnAbortRef.current = turnAbort;
+    let voiceInBackground = false;
     push({ role: "user", text });
     try {
       const execution = await adapter.sendTask(text);
+      throwIfAborted(turnAbort.signal);
       const finalAnswer = execution.finalResult.finalAnswer ?? execution.trace.at(-1)?.resultSummary ?? "Pi completed.";
       setFinalAnswer(finalAnswer);
-      push({ role: "pi", text: finalAnswer });
       const narration = await createNarration(execution, props, narrationModel);
+      throwIfAborted(turnAbort.signal);
       setSummary(narration.spokenSummary);
       setDetail(formatDetail(narration));
       setRisk(narration.riskNote ?? "Risk: none");
       push({ role: "samantha", text: narration.spokenSummary });
       const runId = createRunId();
-      const voice = await runVoice(narration.spokenSummary, props, voiceEnabled, setVoiceStatus, runId, ttsModel);
-      if (voice.audioPath) {
-        setLastAudioPath(voice.audioPath);
-        if (voice.temporary) temporaryAudioPathsRef.current.push(voice.audioPath);
+      let voiceResult: VoiceOutputResult = {
+        requested: voiceEnabled,
+        skipped: !voiceEnabled,
+        success: true,
+        provider: props.ttsProvider,
+        temporary: !props.saveArtifacts,
+        played: false
+      };
+
+      if (voiceEnabled) {
+        setAudioGenerating(true);
+        setVoiceStatus("generating");
+        try {
+          // Phase 1: Generate audio only (input stays locked)
+          const generated = await generateVoiceAudio(narration.spokenSummary, props, ttsModel, turnAbort.signal);
+          throwIfAborted(turnAbort.signal);
+          setLastVoiceResult(generated);
+          if (generated.audioPath) {
+            setLastAudioPath(generated.audioPath);
+            if (generated.temporary) temporaryAudioPathsRef.current.push(generated.audioPath);
+          }
+          if (generated.error) push({ role: "samantha", text: `Voice warning: ${formatVoiceError(generated.error)}`, status: "warning" });
+          voiceResult = generated;
+
+          // Audio generation complete — unlock input before playback
+          setAudioGenerating(false);
+          setRunning(false);
+          voiceInBackground = true;
+          setStatus("Ready (audio playing in background)...");
+
+          // Phase 2: Play audio in background (user can now type)
+          if (generated.success && generated.audioPath) {
+            void playVoiceInBackground(generated.audioPath, setVoiceStatus, turnAbort.signal);
+          }
+        } catch (error) {
+          setAudioGenerating(false);
+          throw error;
+        }
       }
-      if (voice.error) push({ role: "samantha", text: `Voice warning: ${voice.error}`, status: "warning" });
+
       const artifacts = await writeArtifacts({
         enabled: props.saveArtifacts,
         outDir: props.outDir,
@@ -441,17 +570,25 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
         execution,
         trace: execution.trace,
         narration,
-        voice
+        voice: voiceResult
       });
       setArtifactLabel(artifacts.outputDir ?? (props.saveArtifacts ? props.outDir : "off"));
       setStatus("Ready.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      push({ role: "system", text: message, status: "error" });
-      setStatus(message);
+      const aborted = isAbortError(error);
+      push({ role: "system", text: aborted ? "Turn cancelled." : message, status: aborted ? "warning" : "error" });
+      setStatus(aborted ? "Cancelled." : message);
     } finally {
+      if (turnAbortRef.current === turnAbort) {
+        turnAbortRef.current = undefined;
+      }
       setRunning(false);
-      setVoiceStatus((value) => (value === "playing" || value === "generating" ? "done" : value));
+      setAudioGenerating(false);
+      // Don't override voice status if audio is playing in background
+      if (!voiceInBackground) {
+        setVoiceStatus((value) => (value === "playing" || value === "generating" || value === "cancelled" ? "done" : value));
+      }
     }
   }
 
@@ -461,14 +598,15 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       return;
     }
     setVoiceStatus("playing");
-    const playback = await playAudioFile(lastAudioPath);
+    const playback = await playAudioFile(lastAudioPath, 60_000);
     setVoiceStatus(playback.played ? "done" : "warning");
-    if (playback.error) push({ role: "samantha", text: `Replay warning: ${playback.error}`, status: "warning" });
+    if (playback.error) push({ role: "samantha", text: `Replay warning: ${formatVoiceError(playback.error)}`, status: "warning" });
   }
 
   async function runVoiceTest(): Promise<void> {
     setVoiceStatus("generating");
     const voice = await runVoice("这是一段 Her-Samantha 的语音播放测试。", props, true, setVoiceStatus, createRunId(), ttsModel);
+    setLastVoiceResult(voice);
     if (voice.audioPath) {
       setLastAudioPath(voice.audioPath);
       if (voice.temporary) temporaryAudioPathsRef.current.push(voice.audioPath);
@@ -481,9 +619,38 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     });
   }
 
+  async function runVoiceDebug(): Promise<void> {
+    const lines = [
+      "Voice debug",
+      `enabled: ${voiceEnabled}`,
+      `provider: ${props.ttsProvider}`,
+      `model: ${ttsModel}`,
+      `status: ${voiceStatus}`,
+      `last result: ${lastVoiceResult ? `success=${lastVoiceResult.success}, played=${lastVoiceResult.played}, temporary=${lastVoiceResult.temporary}` : "none"}`,
+      `last error: ${lastVoiceResult?.error ?? "none"}`,
+      `last audio: ${lastAudioPath ?? "none"}`
+    ];
+    if (lastAudioPath) {
+      try {
+        const fileStat = await stat(lastAudioPath);
+        const header = await readFile(lastAudioPath).then((buffer) => buffer.subarray(0, 16).toString("hex"));
+        lines.push(`file size: ${fileStat.size} bytes`);
+        lines.push(`file header: ${header}`);
+        lines.push(`hint: RIFF/WAVE starts with 52494646; MP3 often starts with 494433 or fffb.`);
+      } catch (error) {
+        lines.push(`file check failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    push({ role: "system", text: lines.join("\n"), status: lastVoiceResult?.error ? "warning" : "ok" });
+  }
+
   async function runCommand(command: TuiSlashCommand): Promise<void> {
     switch (command.type) {
       case "voice":
+        if (command.debug) {
+          await runVoiceDebug();
+          return;
+        }
         if (command.test) {
           await runVoiceTest();
           return;
@@ -528,6 +695,7 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
           return;
         }
         const parts = (command.value ?? "").split(/\s+/).filter(Boolean);
+        const selectedCapability = normalizeLoginCapability(parts[0]);
         if (parts.length >= 3) {
           const [capRaw, providerName, baseUrl, model, ...keyParts] = parts;
           const cap = capRaw?.toLowerCase();
@@ -566,6 +734,14 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
               push({ role: "system", text: `Failed: ${error instanceof Error ? error.message : String(error)}`, status: "error" });
             }
           })();
+          return;
+        }
+        if (selectedCapability) {
+          setLoginWizard({ step: "providerName", capability: selectedCapability });
+          push({
+            role: "system",
+            text: `=== Login Wizard ===\n${selectedCapability}\nEnter provider name (e.g., deepseek, openai, mimo):`
+          });
           return;
         }
         setLoginWizard({ step: "capability" });
@@ -674,6 +850,10 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
       case "save":
         push({ role: "system", text: `Artifacts: ${artifactLabel}; Pi session dir: ${props.piSessionDir ?? "Pi default"}` });
         return;
+      case "final":
+        setExpandedPanel("final");
+        push({ role: "system", text: `Pi final answer:\n${finalAnswer}` });
+        return;
       case "clear":
         setConversation([{ role: "system", text: "Conversation cleared. Pi session remains active." }]);
         setTrace([]);
@@ -691,12 +871,14 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
 
   function push(entry: ConversationEntry): void {
     setConversation((items) => [...items, entry].slice(-80));
+    setConversationScrollOffset((offset) => (offset > 0 ? Math.min(maxConversationScrollOffset(conversation.length + 1), offset + 1) : 0));
   }
 
-  const visibleConversation = conversation.slice(-14);
+  const visibleConversation = getVisibleConversation(conversation, conversationScrollOffset);
   const presence = getPresenceState({
     input,
     running,
+    audioGenerating,
     voiceEnabled,
     voiceStatus,
     status
@@ -710,16 +892,16 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
     <Box flexDirection="column">
       <Box justifyContent="space-between" marginBottom={1}>
         <Text color="magentaBright" bold>
-          Her-Samantha Pi Harness // SIGNAL ROOM
+          Her-Samantha
         </Text>
         <Text color="cyan">
-          Pi RPC :: {agentModel} :: voice {voiceEnabled ? "on" : "off"}
+          {voiceEnabled ? "voice on" : "voice off"} :: {agentModel}
         </Text>
       </Box>
       <Box>
         <Box width="68%" flexDirection="column" borderStyle="single" borderColor="magenta" paddingX={1}>
           <Box justifyContent="space-between">
-            <Text color="magentaBright">pi v0.75.x</Text>
+            <Text color="magentaBright">samantha shell</Text>
             <Text dimColor>/help  esc cancel  session {sessionLabel}</Text>
           </Box>
           <Text color="gray">{process.cwd()}</Text>
@@ -732,30 +914,19 @@ export function SamanthaTui(props: SamanthaTuiProps): React.ReactElement {
             ))}
           </Box>
           <Box marginTop={1}>
-            <Text color={running ? "gray" : "cyanBright"} bold={!running}>
-              {running ? ">> turn locked; waiting for Pi..." : `>> ${input || "Ask Pi, or type / for commands"}${!running && pulse % 2 === 0 ? "_" : " "}`}
-            </Text>
+            {running ? (
+              <Text color="gray">{">> turn locked; waiting for Samantha..."}</Text>
+            ) : audioGenerating ? (
+              <Box flexDirection="column">
+                <Text color="yellow">voice generating in background...</Text>
+                <InputLine value={input} cursorIndex={cursorIndex} pulse={pulse} />
+              </Box>
+            ) : (
+              <InputLine value={input} cursorIndex={cursorIndex} pulse={pulse} />
+            )}
           </Box>
-          {!running && selectionOptions.length > 0 && (
-            <Box marginTop={1} flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1}>
-              {selectionOptions.slice(0, 8).map((opt, index) => {
-                const selected = index === suggestionIndex % selectionOptions.length;
-                return (
-                  <Box key={`${opt.label}-${index}`} flexDirection="row">
-                    <Text color={selected ? "cyanBright" : "gray"}>
-                      {selected ? ">" : " "}
-                    </Text>
-                    <Text color={selected ? "cyanBright" : "white"} bold={selected}>
-                      {" "}{opt.label}
-                    </Text>
-                    {opt.description && (
-                      <Text color="gray"> — {opt.description}</Text>
-                    )}
-                  </Box>
-                );
-              })}
-              <Text color="gray">  up/down: navigate  enter: select  tab: fill  esc: clear</Text>
-            </Box>
+          {!(running || audioGenerating) && selectionOptions.length > 0 && (
+            <CommandPalette input={input} options={selectionOptions} selectedIndex={suggestionIndex} />
           )}
         </Box>
         <SamanthaSignalPanel
@@ -800,7 +971,7 @@ function SamanthaSignalPanel(props: {
         </Text>
         <Text color="gray">{props.provider}</Text>
       </Box>
-      <Text color="gray">Pi RPC · {props.agentModel} · voice {props.voiceEnabled ? "on" : "off"}</Text>
+      <Text color="gray">agent hidden · {props.agentModel} · voice {props.voiceEnabled ? "on" : "off"}</Text>
 
       <Box marginTop={1} flexDirection="column" alignItems="center">
         <Text color="gray">╭── SIGNAL BODY ──╮</Text>
@@ -821,8 +992,8 @@ function SamanthaSignalPanel(props: {
       </Box>
 
       <Box marginTop={1}>
-        <Text color="gray">ctrl+alt+v replay · ctrl+alt+1-4 open</Text>
-        <Text color="gray">ctrl+alt+q close</Text>
+        <Text color="gray">idle keys: v replay · 1-4 open · q close</Text>
+        <Text color="gray">slash: /voice debug · /final</Text>
       </Box>
     </Box>
   );
@@ -913,6 +1084,136 @@ function FoldedSection(props: {
   );
 }
 
+function InputLine(props: { value: string; cursorIndex: number; pulse: number }): React.ReactElement {
+  const index = Math.min(props.value.length, Math.max(0, props.cursorIndex));
+  const before = props.value.slice(0, index);
+  const cursorChar = props.value[index] ?? " ";
+  const after = props.value.slice(index + (props.value[index] ? 1 : 0));
+  const cursorVisible = props.pulse % 2 === 0;
+
+  if (props.value.length === 0) {
+    return (
+      <Box>
+        <Text color="cyanBright" bold>
+          {">> "}
+        </Text>
+        <Text inverse={cursorVisible}> </Text>
+        <Text color="gray"> Ask Samantha, or type / for commands</Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Box>
+      <Text color="cyanBright" bold>
+        {">> "}
+      </Text>
+      <Text color="cyanBright" bold>
+        {before}
+      </Text>
+      <Text color="black" backgroundColor={cursorVisible ? "cyanBright" : undefined} bold>
+        {cursorChar}
+      </Text>
+      <Text color="cyanBright" bold>
+        {after}
+      </Text>
+    </Box>
+  );
+}
+
+function CommandPalette(props: {
+  input: string;
+  options: SelectionOption[];
+  selectedIndex: number;
+}): React.ReactElement {
+  const meta = commandPaletteMeta(props.input);
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text color="blueBright">────────────────────────────────────────────────────────</Text>
+      <Text color="blueBright" bold>
+        {meta.title}
+      </Text>
+      <Text color="gray">{meta.description}</Text>
+      <Box marginTop={1} flexDirection="column">
+        {props.options.slice(0, 8).map((opt, index) => {
+          const selected = index === props.selectedIndex % props.options.length;
+          return (
+            <Box key={`${opt.label}-${index}`} flexDirection="row">
+              <Text color={selected ? "blueBright" : "gray"}>{selected ? "> " : "  "}</Text>
+              <Text color={selected ? "greenBright" : "white"} bold={selected}>
+                {padRight(opt.label, 28)}
+              </Text>
+              <Text color="gray">{opt.description ?? ""}</Text>
+            </Box>
+          );
+        })}
+      </Box>
+      <Box marginTop={1}>
+        <Text color="gray">Enter to confirm · ↑/↓ to navigate · Tab to complete · Esc to cancel</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function commandPaletteMeta(input: string): { title: string; description: string } {
+  const trimmed = input.trimStart();
+  const parts = trimmed.slice(1).split(/\s+/).filter(Boolean);
+  const command = parts[0]?.toLowerCase();
+  const sub = parts[1]?.toLowerCase();
+  if (command === "model") {
+    if (!sub) {
+      return {
+        title: "Select model target",
+        description: "Switch agent, narration, or voice model. Agent changes restart the Pi runtime session."
+      };
+    }
+    if (sub === "agent") {
+      return {
+        title: "Select agent model",
+        description: "Applies to the Pi runtime. This session restarts after confirmation."
+      };
+    }
+    if (sub === "narr") {
+      return {
+        title: "Select narration model",
+        description: "Applies to Samantha's reply and summary generation on the next turn."
+      };
+    }
+    if (sub === "tts") {
+      return {
+        title: "Select voice model",
+        description: "Applies to Samantha voice generation on the next spoken turn."
+      };
+    }
+  }
+  if (command === "login") {
+    return {
+      title: "Add provider",
+      description: "Create a saved provider profile. Keys are written to .samantha/.env.local."
+    };
+  }
+  if (command === "provider") {
+    return {
+      title: "Manage providers",
+      description: "List, switch, test, or delete saved provider profiles."
+    };
+  }
+  if (command === "voice") {
+    return {
+      title: "Voice controls",
+      description: "Turn voice on or off, or run a direct playback test."
+    };
+  }
+  return {
+    title: "Slash commands",
+    description: "Type to filter commands. Select one to continue or run it directly."
+  };
+}
+
+function padRight(value: string, width: number): string {
+  return value.length >= width ? `${value.slice(0, width - 1)} ` : value.padEnd(width, " ");
+}
+
 function voiceprintColor(state: PresenceState, lineIndex: number): string | undefined {
   if (state === "idle") return lineIndex === 1 ? "gray" : "blueBright";
   if (state === "listening") return "cyanBright";
@@ -955,17 +1256,85 @@ async function createNarration(execution: TaskExecutionResult, props: SamanthaTu
   }
 }
 
+/**
+ * Generate voice audio only (no playback).
+ * Used when we want to unlock input after generation but before playback.
+ */
+async function generateVoiceAudio(
+  spokenSummary: string,
+  props: SamanthaTuiProps,
+  ttsModel?: string,
+  signal?: AbortSignal
+): Promise<VoiceOutputResult> {
+  throwIfAborted(signal);
+  const runId = createRunId();
+  const outputFormat = "wav";
+  const outputPath = props.saveArtifacts
+    ? join(props.outDir, runId, `samantha_summary.${outputFormat}`)
+    : join(await mkdtemp(join(tmpdir(), "her-samantha-voice-")), `samantha_summary.${outputFormat}`);
+
+  return props.ttsProvider === "mock"
+    ? await synthesizeMockTts({ spokenSummary, outputPath, temporary: !props.saveArtifacts })
+    : await withTimeout(
+        synthesizeMimoTts({
+          spokenSummary,
+          outputPath,
+          temporary: !props.saveArtifacts,
+          config: {
+            ...(await readTtsConfigFromRegistry()),
+            outputFormat: "wav",
+            ...(ttsModel && ttsModel !== "auto" ? { model: ttsModel } : {})
+          },
+          signal
+        }),
+        60_000,
+        "Mimo TTS timed out after 60000ms.",
+        signal
+      ).catch((error: unknown): VoiceOutputResult => ({
+        requested: true,
+        skipped: false,
+        success: false,
+        provider: "mimo" as const,
+        temporary: !props.saveArtifacts,
+        played: false,
+        error: isAbortError(error) ? "Voice generation cancelled." : error instanceof Error ? error.message : String(error)
+      }));
+}
+
+/**
+ * Play voice audio in background (fire-and-forget).
+ * Called after input is unlocked so user can type while audio plays.
+ */
+function playVoiceInBackground(
+  audioPath: string,
+  setVoiceStatus: (status: string) => void,
+  signal?: AbortSignal
+): void {
+  void (async () => {
+    try {
+      if (signal?.aborted) return;
+      setVoiceStatus("playing");
+      const playback = await playAudioFile(audioPath, 60_000, signal);
+      setVoiceStatus(playback.played ? "done" : "warning");
+    } catch {
+      setVoiceStatus("done");
+    }
+  })();
+}
+
 async function runVoice(
   spokenSummary: string,
   props: SamanthaTuiProps,
   enabled: boolean,
   setVoiceStatus: (status: string) => void,
   runId: string,
-  ttsModel?: string
+  ttsModel?: string,
+  signal?: AbortSignal
 ): Promise<VoiceOutputResult> {
   if (!enabled) {
     return { requested: false, skipped: true, success: true, provider: props.ttsProvider, temporary: false, played: false };
   }
+  throwIfAborted(signal);
   setVoiceStatus("generating");
   const outputFormat = "wav";
   const outputPath = props.saveArtifacts
@@ -984,10 +1353,12 @@ async function runVoice(
               ...(await readTtsConfigFromRegistry()),
               outputFormat: "wav",
               ...(ttsModel && ttsModel !== "auto" ? { model: ttsModel } : {})
-            }
+            },
+            signal
           }),
           60_000,
-          "Mimo TTS timed out after 60000ms."
+          "Mimo TTS timed out after 60000ms.",
+          signal
         ).catch((error: unknown): VoiceOutputResult => ({
           requested: true,
           skipped: false,
@@ -995,27 +1366,53 @@ async function runVoice(
           provider: "mimo" as const,
           temporary: !props.saveArtifacts,
           played: false,
-          error: error instanceof Error ? error.message : String(error)
+          error: isAbortError(error) ? "Voice generation cancelled." : error instanceof Error ? error.message : String(error)
         }));
 
+  throwIfAborted(signal);
   if (!generated.success || !generated.audioPath) return generated;
+
   setVoiceStatus("playing");
-  const playback = await playAudioFile(generated.audioPath);
-  return { ...generated, played: playback.played, error: playback.error };
+  const playback = await playAudioFile(generated.audioPath, 60_000, signal);
+  throwIfAborted(signal);
+  setVoiceStatus(playback.played ? "done" : "warning");
+  return {
+    ...generated,
+    played: playback.played,
+    error: playback.error ?? generated.error
+  };
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string, signal?: AbortSignal): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
+  if (signal?.aborted) throw createAbortError();
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+      new Promise<never>((_, reject) => {
+        signal?.addEventListener("abort", () => reject(createAbortError()), { once: true });
       })
     ]);
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw createAbortError();
+}
+
+function createAbortError(): Error {
+  const error = new Error("Turn cancelled.");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || /cancelled|aborted/i.test(error.message));
 }
 
 function formatRole(role: ConversationEntry["role"]): string {
@@ -1040,9 +1437,20 @@ function formatDetail(narration: NarrationResult): string {
   return narration.textDetail.highLevelSummary || narration.textDetail.steps.map((step) => step.summary).join(" | ") || "No detail.";
 }
 
+function formatVoiceError(error: string): string {
+  const withoutCliXml = error
+    .replace(/#< CLIXML[\s\S]*/i, "PowerShell audio backend failed.")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/_x[0-9a-f]{4}_/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return withoutCliXml.length > 240 ? `${withoutCliXml.slice(0, 237)}...` : withoutCliXml;
+}
+
 function getPresenceState(input: {
   input: string;
   running: boolean;
+  audioGenerating: boolean;
   voiceEnabled: boolean;
   voiceStatus: string;
   status: string;
@@ -1051,6 +1459,7 @@ function getPresenceState(input: {
   if (/warning/i.test(input.status) || input.voiceStatus === "warning") return "warning";
   if (input.voiceStatus === "playing" || input.voiceStatus === "generating") return "speaking";
   if (input.running) return "thinking";
+  if (input.audioGenerating) return "speaking";
   if (input.input.length > 0) return "listening";
   return input.voiceEnabled ? "idle" : "idle";
 }
@@ -1078,12 +1487,27 @@ function preview(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
 
-function isControlAltShortcut(
+function isPanelShortcut(
   inputChar: string,
   key: { ctrl?: boolean; meta?: boolean },
   shortcut: "1" | "2" | "3" | "4" | "q" | "v"
 ): boolean {
-  return !key.ctrl && !key.meta && inputChar.toLowerCase() === shortcut;
+  if (!inputChar) return false;
+  const char = inputChar.toLowerCase();
+  return char === shortcut || Boolean(key.ctrl && key.meta && char === shortcut);
+}
+
+const CONVERSATION_WINDOW_SIZE = 14;
+
+function maxConversationScrollOffset(length: number): number {
+  return Math.max(0, length - CONVERSATION_WINDOW_SIZE);
+}
+
+function getVisibleConversation(entries: ConversationEntry[], offsetFromBottom: number): ConversationEntry[] {
+  const clampedOffset = Math.min(maxConversationScrollOffset(entries.length), Math.max(0, offsetFromBottom));
+  const end = Math.max(0, entries.length - clampedOffset);
+  const start = Math.max(0, end - CONVERSATION_WINDOW_SIZE);
+  return entries.slice(start, end);
 }
 
 type SelectionOption = {
@@ -1092,6 +1516,13 @@ type SelectionOption = {
   value: string;
   action: "complete" | "submit";
 };
+
+function normalizeLoginCapability(value: string | undefined): "narration" | "tts" | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "narr" || normalized === "narration") return "narration";
+  if (normalized === "tts") return "tts";
+  return undefined;
+}
 
 function getSelectionOptions(
   input: string,
@@ -1116,6 +1547,7 @@ function getSelectionOptions(
     { label: "/session", description: "Show current session", value: "/session", action: "submit" },
     { label: "/resume", description: "Resume a saved session", value: "/resume ", action: "complete" },
     { label: "/save", description: "Show artifact status", value: "/save", action: "submit" },
+    { label: "/final", description: "Show hidden Pi final answer", value: "/final", action: "submit" },
     { label: "/clear", description: "Clear conversation", value: "/clear", action: "submit" },
     { label: "/help", description: "Show all commands", value: "/help", action: "submit" },
     { label: "/exit", description: "Exit Samantha", value: "/exit", action: "submit" }
@@ -1152,21 +1584,31 @@ function getSubOptions(
     }
     if (cmd === "login") {
       return [
-        { label: "narration", description: "Add a text/narration model provider", value: "/login narr ", action: "complete" },
-        { label: "tts", description: "Add a TTS/voice model provider", value: "/login tts ", action: "complete" }
+        { label: "narration", description: "Add a text/narration model provider", value: "/login narr", action: "submit" },
+        { label: "tts", description: "Add a TTS/voice model provider", value: "/login tts", action: "submit" }
       ];
     }
     if (cmd === "voice") {
       return [
         { label: "on", description: "Enable voice", value: "/voice on", action: "submit" },
         { label: "off", description: "Disable voice", value: "/voice off", action: "submit" },
-        { label: "test", description: "Test voice playback", value: "/voice test", action: "submit" }
+        { label: "test", description: "Test voice playback", value: "/voice test", action: "submit" },
+        { label: "debug", description: "Inspect last generated audio and playback status", value: "/voice debug", action: "submit" }
       ];
     }
     return [];
   }
 
   if (cmd === "model" && parts.length === 2) {
+    if (sub === "agent") {
+      return [
+        { label: agentModel === "auto" ? "auto" : agentModel, description: "Current Pi model", value: `/model agent ${agentModel}`, action: "submit" },
+        { label: "(custom model id...)", description: "Type a different Pi model ID", value: "/model agent ", action: "complete" }
+      ];
+    }
+    if (sub === "narr" || sub === "tts") {
+      return getModelOptions(sub, registry);
+    }
     const opts: SelectionOption[] = [
       { label: `agent  (current: ${agentModel})`, description: "Switch underlying Pi model", value: `/model agent `, action: "complete" },
       { label: `narr   (current: ${narrationModel})`, description: "Switch narration model", value: `/model narr `, action: "complete" },
@@ -1175,22 +1617,18 @@ function getSubOptions(
     return opts.filter((o) => !sub || o.label.includes(sub));
   }
 
+  if (cmd === "model" && parts.length === 3 && sub === "agent") {
+    const modelFilter = parts[2]?.toLowerCase();
+    const options: SelectionOption[] = [
+      { label: agentModel === "auto" ? "auto" : agentModel, description: "Current Pi model", value: `/model agent ${agentModel}`, action: "submit" },
+      { label: "(custom model id...)", description: "Type a different Pi model ID", value: "/model agent ", action: "complete" }
+    ];
+    return options.filter((option) => !modelFilter || option.label.toLowerCase().includes(modelFilter));
+  }
+
   if (cmd === "model" && parts.length === 3 && (sub === "narr" || sub === "tts")) {
-    const cap = sub === "narr" ? "narration" : "tts";
-    const options: SelectionOption[] = [];
-    const section = registry?.[cap];
-    if (section) {
-      for (const [name, entry] of Object.entries(section.providers)) {
-        options.push({
-          label: `${entry.model}  (${name})`,
-          description: entry.baseUrl,
-          value: `/model ${sub} ${entry.model}`,
-          action: "submit"
-        });
-      }
-    }
-    options.push({ label: "(custom model id...)", description: "Type a different model ID", value: `/model ${sub} `, action: "complete" });
-    return options;
+    const modelFilter = parts[2]?.toLowerCase();
+    return getModelOptions(sub, registry).filter((option) => !modelFilter || option.label.toLowerCase().includes(modelFilter));
   }
 
   if (cmd === "provider" && parts.length === 2) {
@@ -1230,13 +1668,32 @@ function getSubOptions(
   }
 
   if (cmd === "login" && parts.length === 2) {
-    return [
-      { label: "narration", description: "Add a text/narration model provider", value: "/login narr ", action: "complete" },
-      { label: "tts", description: "Add a TTS/voice model provider", value: "/login tts ", action: "complete" }
+    const opts: SelectionOption[] = [
+      { label: "narration", description: "Add a text/narration model provider", value: "/login narr", action: "submit" },
+      { label: "tts", description: "Add a TTS/voice model provider", value: "/login tts", action: "submit" }
     ];
+    return opts.filter((option) => !sub || option.label.startsWith(sub) || option.value.includes(sub));
   }
 
   return [];
+}
+
+function getModelOptions(kind: "narr" | "tts", registry: ProviderRegistry | null): SelectionOption[] {
+  const cap = kind === "narr" ? "narration" : "tts";
+  const options: SelectionOption[] = [];
+  const section = registry?.[cap];
+  if (section) {
+    for (const [name, entry] of Object.entries(section.providers)) {
+      options.push({
+        label: `${entry.model}  (${name})`,
+        description: section.active === name ? `active · ${entry.baseUrl}` : entry.baseUrl,
+        value: `/model ${kind} ${entry.model}`,
+        action: "submit"
+      });
+    }
+  }
+  options.push({ label: "(custom model id...)", description: "Type a different model ID", value: `/model ${kind} `, action: "complete" });
+  return options;
 }
 
 function presenceBorderColor(state: PresenceState): string {

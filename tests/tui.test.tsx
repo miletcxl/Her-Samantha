@@ -18,11 +18,12 @@ describe("Samantha TUI", () => {
     );
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Her-Samantha Pi Harness");
-    expect(frame).toContain("pi v0.75.x");
+    expect(frame).toContain("Her-Samantha");
+    expect(frame).toContain("samantha shell");
     expect(frame).toContain("Samantha");
     expect(frame).toContain("Summary");
-    expect(frame).toContain("Harness");
+    expect(frame).toContain("agent hidden");
+    expect(frame).toContain("Ask Samantha");
     expect(frame).not.toContain("private reasoning");
     expect(frame).not.toContain("thinking");
   });
@@ -30,6 +31,7 @@ describe("Samantha TUI", () => {
   it("parses shell slash commands", () => {
     expect(parseTuiSlashCommand("/voice off")).toEqual({ type: "voice", enabled: false });
     expect(parseTuiSlashCommand("/voice test")).toEqual({ type: "voice", test: true });
+    expect(parseTuiSlashCommand("/voice debug")).toEqual({ type: "voice", debug: true });
     expect(parseTuiSlashCommand("/model mimo-v2.5-pro")).toEqual({ type: "model", value: "mimo-v2.5-pro" });
     expect(parseTuiSlashCommand("/login")).toEqual({ type: "login" });
     expect(parseTuiSlashCommand("/provider list")).toEqual({ type: "provider", action: "list" });
@@ -45,10 +47,12 @@ describe("Samantha TUI", () => {
     expect(parseTuiSlashCommand("/session")).toEqual({ type: "session" });
     expect(parseTuiSlashCommand("/resume abc")).toEqual({ type: "resume", value: "abc" });
     expect(parseTuiSlashCommand("/save")).toEqual({ type: "save" });
+    expect(parseTuiSlashCommand("/final")).toEqual({ type: "final" });
     expect(parseTuiSlashCommand("/clear")).toEqual({ type: "clear" });
     expect(parseTuiSlashCommand("/help")).toEqual({ type: "help" });
     expect(parseTuiSlashCommand("/exit")).toEqual({ type: "exit" });
     expect(TUI_COMMANDS).toContain("/model");
     expect(TUI_COMMANDS).toContain("/voice test");
+    expect(TUI_COMMANDS).toContain("/voice debug");
   });
 });
