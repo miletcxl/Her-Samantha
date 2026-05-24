@@ -102,13 +102,19 @@ User
 ## TUI
 
 <p align="center">
-  <img src="./asset/figure/idle.png" alt="Samantha TUI idle" width="45%" />
-  <img src="./asset/figure/thinking.png" alt="Samantha TUI processing" width="45%" />
+  <img src="./asset/figure/idle.png" alt="Samantha TUI idle" width="80%" />
 </p>
 
 <p align="center">
-  <img src="./asset/figure/speaking.png" alt="Samantha TUI speaking" width="45%" />
-  <img src="./asset/figure/process.png" alt="Samantha TUI working" width="45%" />
+  <img src="./asset/figure/thinking.png" alt="Samantha TUI processing" width="80%" />
+</p>
+
+<p align="center">
+  <img src="./asset/figure/speaking.png" alt="Samantha TUI speaking" width="80%" />
+</p>
+
+<p align="center">
+  <img src="./asset/figure/process.png" alt="Samantha TUI working" width="80%" />
 </p>
 
 **Left panel:** conversation with Samantha. Type tasks, see agent replies, watch Samantha narrate.
